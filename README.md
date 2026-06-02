@@ -6,5 +6,5 @@ Step 1: Deploy Ubuntu 64-bit Server with OpenSSH enabled. Login to the OS with S
 
 Step 2: Download the `prep-ubuntu` bash script. 
 ```
-sudo curl <raw github url> >> prep-ubuntu.sh
+sudo curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/ubuntu/prep-ubuntu.sh >> prep-ubuntu.sh
 ```
