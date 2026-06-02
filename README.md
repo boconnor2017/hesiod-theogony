@@ -8,3 +8,13 @@ Step 2: Download the `prep-ubuntu` bash script.
 ```
 sudo curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/ubuntu/prep-ubuntu.sh >> prep-ubuntu.sh
 ```
+
+Step 3: Run the `prep-ubuntu` bash script.
+```
+sudo sh prep-ubuntu.sh
+```
+
+Step 4: Navigate to `/usr/local` working directory.
+```
+cd /usr/local
+```

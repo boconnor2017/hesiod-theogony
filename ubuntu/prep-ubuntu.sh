@@ -39,7 +39,8 @@ rm packages-microsoft-prod.deb
 
 # Update package lists and install PowerShell
 apt-get update
-apt-get install -y powershell
+#apt-get install -y powershell
+snap install powershell --classic
 
 # 5. Securely Configure /usr/local for Development
 echo "--> Configuring secure permissions for /usr/local..."
@@ -77,8 +78,10 @@ fi
 echo "--> Installing Open VM Tools for VMware optimization..."
 apt-get install -y open-vm-tools
 
+# 8. Clone from github
+echo "--> Cloning hesiod-theogony from GitHub to /usr/local/"
+git clone https://github.com/boconnor2017/hesiod-theogony.git /usr/local/hesiod-theogony
+
 echo "=========================================================================="
 echo " Bootstrap Complete!"
-echo " IMPORTANT: Please log out and log back in for group changes to take effect."
-echo " Press [F2] in Vim to toggle 'Paste Mode' before pasting from VS Code."
 echo "=========================================================================="
