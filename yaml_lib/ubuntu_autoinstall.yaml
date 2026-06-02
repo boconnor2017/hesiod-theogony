@@ -1,0 +1,16 @@
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: ubuntu-server
+    password: "$6$ex271SjbaMmSbaSg$9Q5OasxmBFasBlhk89fN49R0O8N2E/n.QGk05pZHpL7M4vT:YourHashedPassword"
+    username: ubuntu
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: lvm

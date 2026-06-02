@@ -17,12 +17,15 @@ This is a branch from Project Hesiod: https://github.com/boconnor2017/hesiod. **
 | Hesiod K8 Cluster Master | 4    | 16           | 100           |
 | Hesiod K8 Cluster Node 1 | 4    | 16           | 100           |
 | VCF Installer            | 4    | 16           | 914           |
-| Nested ESXi Host 1       | 24   | 384          | 1080          |
-| Nested ESXi Host 2       | 24   | 384          | 1080          |
-| Nested ESXi Host 3       | 24   | 384          | 1080          |
-| Nested ESXi Host 4       | 24   | 384          | 1080          |
-| Nested ESXi Host 5       | 24   | 384          | 1080          |
-| TOTAL:                   | 24   | 1984         | 6614          |
+| Nested ESXi Host 1       | 40   | 320          | 1080          |
+| Nested ESXi Host 2       | 40   | 320          | 1080          |
+| Nested ESXi Host 3       | 40   | 320          | 1080          |
+| Nested ESXi Host 4       | 40   | 320          | 1080          |
+| Nested ESXi Host 5       | 40   | 320          | 1080          |
+| TOTAL:                   | 40   | 1664         | 6614          |
+
+# Architecture Summary
+![img02](img_lib/architecture_summary.png)
 
 # Quick Start: Deploy Hesiod Main Appliance
 Step 1: Deploy Ubuntu 64-bit Server with OpenSSH enabled. Login to the OS with SSH using defined username and password.   

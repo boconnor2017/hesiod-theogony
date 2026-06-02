@@ -1,0 +1,236 @@
+{
+  "version": "9.1.0.0",
+  "vcfInstanceName": "",
+  "sddcId": "",
+  "ceipEnabled": false,
+  "workflowType": "VCF",
+  "dnsSpec": {
+    "subdomain": "",
+    "nameservers": [
+      "8.8.8.8"
+    ]
+  },
+  "ntpServers": [
+    "pool.ntp.org"
+  ],
+  "networkSpecs": [
+    {
+      "networkType": "MANAGEMENT",
+      "ipAddressVersion": "IPv4",
+      "subnet": "",
+      "gateway": "",
+      "vlanId": "",
+      "activeUplinks": [],
+      "portGroupKey": "",
+      "standbyUplinks": [],
+      "teamingPolicy": ""
+    },
+    {
+      "networkType": "VM_MANAGEMENT",
+      "ipAddressVersion": "IPv4",
+      "subnet": "",
+      "gateway": "",
+      "vlanId": "",
+      "activeUplinks": [],
+      "portGroupKey": "",
+      "standbyUplinks": [],
+      "teamingPolicy": ""
+    },
+    {
+      "networkType": "VMOTION",
+      "ipAddressVersion": "IPv4",
+      "subnet": "",
+      "gateway": "",
+      "vlanId": "",
+      "mtu": 9000,
+      "includeIpAddressRanges": [
+        {
+          "startIpAddress": "",
+          "endIpAddress": ""
+        }
+      ],
+      "activeUplinks": [],
+      "portGroupKey": "",
+      "standbyUplinks": [],
+      "teamingPolicy": ""
+    },
+    {
+      "networkType": "VSAN",
+      "ipAddressVersion": "IPv4",
+      "subnet": "",
+      "gateway": "",
+      "vlanId": "",
+      "mtu": 9000,
+      "includeIpAddressRanges": [
+        {
+          "startIpAddress": "",
+          "endIpAddress": ""
+        }
+      ],
+      "activeUplinks": [],
+      "portGroupKey": "",
+      "standbyUplinks": [],
+      "teamingPolicy": ""
+    }
+  ],
+  "vspClusterSpec": {
+    "ipv4Pool": {
+      "ipRange": {
+        "startIpAddress": "",
+        "endIpAddress": ""
+      }
+    },
+    "platformFqdn": "",
+    "instanceFqdn": "",
+    "fleetFqdn": "",
+    "size": "small",
+    "name": "",
+    "internalClusterCidrIpv4": "198.18.0.0/15"
+  },
+  "vcfAutomationSpec": {
+    "ipPool": [
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "hostname": "",
+    "platformFqdn": "",
+    "nodePrefix": "",
+    "internalClusterCidr": "198.18.0.0/15",
+    "useExistingDeployment": false,
+    "size": "small"
+  },
+  "nsxtSpec": {
+    "transportVlanId": "",
+    "ipAddressPoolSpec": {
+      "name": "clusterName-tep01",
+      "description": "clusterName-tep01 descr",
+      "subnets": [
+        {
+          "cidr": "",
+          "gateway": "",
+          "ipAddressPoolRanges": [
+            {
+              "start": "",
+              "end": ""
+            }
+          ]
+        }
+      ]
+    },
+    "nsxtManagerSize": "medium",
+    "vipFqdn": "",
+    "nsxtManagers": [
+      {
+        "hostname": ""
+      }
+    ],
+    "useExistingDeployment": false,
+    "vpcSpec": {
+      "dtgwSpec": {
+        "vlan": "",
+        "gatewayCidr": "",
+        "externalIpBlockCidr": "",
+        "privateTgwIpBlockCidr": "172.31.0.0/16"
+      }
+    }
+  },
+  "vcfOperationsSpec": {
+    "applianceSize": "small",
+    "useExistingDeployment": false,
+    "nodes": [
+      {
+        "hostname": "",
+        "rootUserPassword": "",
+        "type": "master"
+      }
+    ]
+  },
+  "vcfOperationsCollectorSpec": {
+    "applianceSize": "small",
+    "hostname": "",
+    "useExistingDeployment": false
+  },
+  "licenseServerSpec": {
+    "hostname": ""
+  },
+  "vidbSpec": {
+    "hostname": ""
+  },
+  "saltSpec": {},
+  "saltRaasSpec": {},
+  "telemetryAcceptorSpec": {},
+  "fleetLcmSpec": {
+    "hostname": ""
+  },
+  "sddcLcmSpec": {
+    "hostname": ""
+  },
+  "fleetDepotSpec": {},
+  "vcenterSpec": {
+    "vcenterHostname": "",
+    "vmSize": "small",
+    "storageSize": "lstorage",
+    "ssoDomain": "vsphere.local",
+    "useExistingDeployment": false
+  },
+  "clusterSpec": {
+    "datacenterName": "",
+    "clusterName": ""
+  },
+  "datastoreSpec": {
+    "vsanSpec": {
+      "vsanDedup": true,
+      "failuresToTolerate": 0,
+      "esaConfig": {
+        "enabled": false
+      },
+      "encryptionConfig": {
+        "dataInTransitConfig": {
+          "enable": false
+        }
+      },
+      "datastoreName": ""
+    }
+  },
+  "dvsSpecs": [
+    {
+      "dvsName": "",
+      "networks": [
+        "MANAGEMENT",
+        "VM_MANAGEMENT",
+        "VMOTION",
+        "VSAN"
+      ],
+      "mtu": 0,
+      "vmnicsToUplinks": [
+        {
+          "id": "",
+          "uplink": ""
+        }
+      ],
+      "nsxtSwitchConfig": {
+        "transportZones": [
+          {
+            "name": "",
+            "transportType": ""
+          }
+        ],
+        "hostSwitchOperationalMode": ""
+      },
+      "nsxTeamings": [
+        {
+          "policy": "",
+          "activeUplinks": [],
+          "standByUplinks": []
+        }
+      ]
+    }
+  ],
+  "sddcManagerSpec": {
+    "hostname": "",
+    "useExistingDeployment": false
+  }
+}
