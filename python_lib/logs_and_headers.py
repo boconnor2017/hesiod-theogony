@@ -1,20 +1,8 @@
-# Hesiod Custom Headers and Logs Python Library 2024
+# Hesiod Custom Headers and Logs 
 # Author: Brendan O'Connor
-# Date: January 2024
-# Version: 3.0
+# Date: June 2026
+# Version: 4.0
 
-import requests
-import urllib3
-import urllib
-import shutil
-import time
-import json
-import os
-import docker 
-import paramiko
-import docker
-import subprocess
-import sys
 from datetime import datetime
 
 def e2e_log_header(logfile_name):
