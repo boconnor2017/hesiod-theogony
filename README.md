@@ -14,7 +14,12 @@ Step 3: Run the `prep-ubuntu` bash script.
 sudo sh prep-ubuntu.sh
 ```
 
-Step 4: Navigate to `/usr/local` working directory.
+Step 4: Navigate to `/usr/local/hesiod-theogony` working directory.
 ```
-cd /usr/local
+cd /usr/local/hesiod-theogony
+```
+
+Step 5: Run `hesiod-theogony` python script.
+```
+python3 hesiod-theogony.py
 ```
