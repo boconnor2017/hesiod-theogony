@@ -11,8 +11,8 @@ from python_lib import standard_imports as std
 from python_lib import logs_and_headers as liblog
 from python_lib import file_management as libfile
 from python_lib import pip_install as libpip
-from python_lib import json_management as libjson
-
+from python_lib import json_management as libjson 
+from python_lib import vmware as libvmw
 
 # Local Functions
 def _main_(args):
@@ -64,14 +64,39 @@ def help_menu():
     print("")
     print("")
 
+def import_configuration_parameters():
+    # Check for Required Configuration Parameters
+    liblog.print_logs("Checking for required configuration parameters.")
+    lab_spec_doesexist = libfile.check_if_file_exists("conf/lab_spec.json")
+
+    # Import Configuration Parameters
+    if lab_spec_doesexist == 1:
+        liblog.print_logs("LAB_SPEC CHECK: exists.")
+        lab_spec_str = libjson.populate_var_from_json_file("conf", "lab_spec.json")
+        lab_spec_py = libjson.load_json_variable(lab_spec_str)
+        liblog.print_logs("lab_spec_py variable populated.")
+        liblog.print_logs("Validation check: "+lab_spec_py["validation_check"])
+        return lab_spec_py
+    else:
+        print("")
+        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+        print("    ERR: lab_spec.json does not exist in the /conf folder. To resolve this you have two options:")
+        print("        Option 1: Manually copy the contents from json_lib/lab_spec.json and paste into conf/lab_spec.json. Edit conf/lab_spec.json accordingly.")
+        print("        Option 2: Rerun this script using the -m1 parameter. This will launch a prompt wizard that will populate conf/lab_spec.json for you.")
+        print("")
+        print("        If you have already completed Module 1, upload the json file to conf/lab_spec.json and run again.")
+        print("")
+        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+        print("")
+
 def install_pip_packages():
     print("=========================================================")
     print("First time run. Initializing required python packages.")
     print("=========================================================")
     libpip.install_package("docker")
-    libfile.append_text_to_file("import docker"+" \n", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import docker", "python_lib/standard_imports.py")
     libpip.install_package("paramiko")
-    libfile.append_text_to_file("import paramiko"+" \n", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import paramiko", "python_lib/standard_imports.py")
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
@@ -88,6 +113,15 @@ def m2():
     print("=========================================================")
     print("Launching Theogony: MODULE 2")
     print("=========================================================")
+    lab_spec_py = import_configuration_parameters()
+    libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
+    print("=========================================================")
+    print("Module 2 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
 
 def m3():
     print("=========================================================")
@@ -105,12 +139,14 @@ def m5():
     print("=========================================================")
 
 def update_theo_database():
+    liblog.print_logs("Updating theo database.")
     existcheck = libfile.check_if_file_exists("conf/theogony_db.json")
     if existcheck == 1:
         theogony_db_str = libjson.populate_var_from_json_file("conf", "theogony_db.json")
         theogony_db_py = libjson.load_json_variable(theogony_db_str)
         theogony_db_py["runs"] = theogony_db_py["runs"]+1
         libjson.dump_json_to_file(theogony_db_py, "conf/theogony_db.json")
+        liblog.print_logs("Runs: "+str(theogony_db_py["runs"]))
         return
     else:
        libfile.copy_file_from_srcdir_to_destdir("json_lib/theogony_db.json", "conf/theogony_db.json")

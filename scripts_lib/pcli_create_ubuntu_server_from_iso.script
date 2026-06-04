@@ -1,0 +1,195 @@
+#!/bin/sh
+
+# Server Input Variables
+$esxi_server_ip_address = "ID:SIV-001"
+$esxi_server_username = "ID:SIV-002"
+$esxi_server_password = "ID:SIV-003"
+$esxi_server_datastore = "ID:SIV-004"
+$path_to_iso_on_datastore = "ID:SIV-005"
+
+# VM Input Variables
+$vm_name = "ID:VIV-001"
+$vm_cpu = ID:VIV-002
+$vm_memoryMB = (ID:VIV-003*1024)
+$vm_disk1GB = ID:VIV-004
+$vm_network = "ID:VIV-005"
+
+# Ubuntu Input Variables
+$ubuntu_server_ip = "ID:EIV-001"
+$ubuntu_server_subnet = "ID:EIV-002"
+$ubuntu_server_gateway = "ID:EIV-003"
+
+
+### * * * * * * Try not to change anything below this point * * * * * * * *
+
+# Ignore https cert errors
+Set-PowerCLIConfiguration -InvalidCertificateAction ignore -Confirm:$false
+
+# Connect to the ESXi host and open a session.
+$esxi_server_ip_address | Foreach-Object {Connect-VIserver $_ -User $esxi_server_username -Password $esxi_server_password}
+
+# Build Virtual Machine
+New-VM -Name $vm_name -NumCPU $vm_cpu -MemoryMB $vm_memoryMB -NetworkName $vm_network -Datastore $esxi_server_datastore -DiskStorageFormat "Thick" -GuestID "ubuntu64Guest"
+$ubuntu_server_vm = Get-VM -Name $vm_name
+
+# Create CD Drive and attach ESXi ISO
+New-CDDrive -VM $ubuntu_server_vm.Name
+$cd_drive_specs = Get-CDDrive -VM $ubuntu_server_vm
+Set-CDDrive -CD $cd_drive_specs -IsoPath $path_to_iso_on_datastore -StartConnected:$true -Confirm:$false
+
+# Expand Virtual Disk Space
+$disks = Get-HardDisk -VM $ubuntu_server_vm
+Set-HardDisk -HardDisk $disks[0] -CapacityGB 100 -Confirm:$false
+
+# Start VM
+Start-vm -vm $ubuntu_server_vm.Name
+
+# Pause for installation media to load
+Start-Sleep -Seconds 120
+
+# Establish Keystrokes as a function
+. .\Set-VMKeystrokes.ps1
+
+# Install Ubuntu using Keystrokes
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 10
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "Hesiod"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod-k8-node"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput " "
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+
+# Pause for initial boot process
+Start-Sleep -Seconds 240
+
+# Reboot
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 3
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 10
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+
+# Pause for reboot
+Start-Sleep -Seconds 120
+
+# First Time Login
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 5
+
+# Install net-tools
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo apt install net-tools"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+
+# Pause for installation of net-tools
+Start-Sleep -Seconds 10
+
+# Configure Network
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo ifconfig ens192 $ubuntu_server_ip netmask $ubuntu_server_subnet"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo route add default gateway $ubuntu_server_gateway"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1

@@ -117,6 +117,12 @@ def hesiod_print_header():
     err = ""
     print(err)
 
+def print_logs(err):
+    tstamp = str(datetime.now())
+    logoutput = "    LOG ("+tstamp+"): "+err
+    print(logoutput)
+    return
+
 def write_to_logs(err, logfile_name):
     tstamp = str(datetime.now())
     logfile = open(logfile_name, "a")

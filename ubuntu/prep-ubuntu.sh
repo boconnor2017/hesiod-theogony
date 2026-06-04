@@ -82,6 +82,11 @@ apt-get install -y open-vm-tools
 echo "--> Cloning hesiod-theogony from GitHub to /usr/local/"
 git clone https://github.com/boconnor2017/hesiod-theogony.git /usr/local/hesiod-theogony
 
+# 9. Install PowerCLI
+echo "--> Installing PowerCLI"
+cp /usr/local/hesiod-theogony/ubuntu/install_powercli_ubuntu.ps1 $PWD
+pwsh install_powercli_ubuntu.ps1
+
 echo "=========================================================================="
 echo " Bootstrap Complete!"
 echo "=========================================================================="

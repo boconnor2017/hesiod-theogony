@@ -1,1 +1,95 @@
-{}
+{
+    "validation_check" : "hello world.",
+    "authentication" : [{
+        "system" : "ubuntu",
+        "username" : "<sample: hesiod>",
+        "password" : "<sample: VMware123!>"
+    },
+    {
+        "system" : "esxi_physical",
+        "username" : "<sample: root>",
+        "password" : "<sample: VMware123!>"
+    },
+    {
+        "system" : "esxi_nested",
+        "username" : "<sample: root>",
+        "password" : "<sample: VMware123!>"
+    }],
+
+    "domain" : {
+        "name" : "<sample: hesiod.local>",
+        "server_ips" : ["8.8.8.8"],
+        "ntp" : "pool.ntp.org"
+    },
+
+    "network" : [{
+        "name" : "<sample: physical esxi management>",
+        "default_gateway" : "<sample: 10.0.1.1>",
+        "subnet_mask" : "<sample: 255.255.255.0>",
+        "cidr" : "<sample: 24>" 
+    },
+    {
+        "name" : "<sample: nested esxi management>",
+        "default_gateway" : "<sample: 10.0.2.1>",
+        "subnet_mask" : "<sample: 255.255.255.0>",
+        "cidr" : "<sample: 24>" 
+    },
+    {
+        "name" : "<sample: vm management>",
+        "default_gateway" : "<sample: 10.0.3.1>",
+        "subnet_mask" : "<sample: 255.255.255.0>",
+        "cidr" : "<sample: 24>" 
+    }],
+
+    "ubuntu_servers" : [{
+        "ubuntu_type" : "Hesiod K8 Cluster",
+        "deploy_this_many" : 2,
+        "naming_convention" : "<Sample: hesvcf-theo>",
+        "assign_ip_from_this_network" : 2, 
+        "assign_ip_from_this_range_start" : "4",
+        "assign_ip_from_this_range_end" : "5",
+        "numCPU" : "4",
+        "expose_hw_virt_to_guest" : "yes",
+        "memoryGB" : "16",
+        "harddisks" : [{
+            "storage_GB" : "100"
+        }],
+        "CD_path" : "[datastore1] iso/ubuntu-26.04-live-server-amd64.iso",
+        "deploy_to_this_physical_host" : 0,
+        "deploy_to_this_network" : 0,
+        "deploy_to_this_datastore" : 0
+    }],
+
+    "physical_esxi_servers" : [{
+        "name_of_host" : "<sample: esx01>",
+        "use_these_credentials" : 1,
+        "ip_address" : "<Sample: 10.0.1.1>",
+        "deploy_vms_to_these_networks" : ["<Sample: VM Network>"],
+        "deploy_vms_to_these_datastores" : ["<Sample: datastore1>"]
+    }],
+
+    "nested_esxi_servers" : [{
+        "nested_esxi_type" : "<Select: MGT|VI >",
+        "deploy_this_many" : 5,
+        "naming_convention" : "<Sample: hesvcf-esx>",
+        "assign_ip_from_this_network" : 1, 
+        "assign_ip_from_this_range_start" : "20",
+        "assign_ip_from_this_range_end" : "28",
+        "numCPU" : "40",
+        "expose_hw_virt_to_guest" : "yes",
+        "memoryGB" : "320",
+        "harddisks" : [{
+            "storage_GB" : "16"
+        },
+        {
+            "storage_GB" : "40"
+        },
+        {
+            "storage_GB" : "1024"
+        }],
+        "CD_path" : "[datastore1] ISO/VMware-ESXi-9.1.iso",
+        "deploy_to_this_physical_host" : 0,
+        "deploy_to_this_network" : 0,
+        "deploy_to__this_datastore" : 0
+    }]
+}
