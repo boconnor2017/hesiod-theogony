@@ -55,8 +55,12 @@ From this point forward, running the `hesiod-theogony` python script on this pre
 # Modules: Deploy a VMware Lab Environment
 Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly.
 
-## Module 1: Create Lab Spec JSON file
-The `lab_spec.json` file contains the specs for your home lab. Specs include physical network configurations, physical host configurations, storage configurations, credentials, etc. Blank json templates are stored in the `/json_lib` folder. This script will generate a copy and will prompt you for inputs. Configurations are stored in the `/conf` folder. If you prefer to generate your own json file, copy `/json_lib/lab_spec.json`, paste into `/conf/lab_spec.json` and edit directly using vi editor. Alternatively, if you've created one already, simply upload it to `/conf/lab_spec.json`. **WARNING: Do not edit or remove any of the files in /json_lib. Copy only.**
+## Module 1: Create Lab Spec JSON files
+The `lab_spec.json` file contains the specs for your home lab. Specs include physical network configurations, physical host configurations, storage configurations, credentials, etc. Blank json templates are stored in the `/json_lib` folder. This script will generate a copy and will prompt you for inputs. Configurations are stored in the `/conf` folder. If you prefer to generate your own json file, copy `/json_lib/lab_spec.json`, paste into `/conf/lab_spec.json` and edit directly using vi editor. Alternatively, if you've created one already, simply upload it to `/conf/lab_spec.json`.    
+
+The `dns_spec.json` file contains the dns specs for a brand new DNS server that you can deploy as part of Module 3. Blank json templates are stored in the `/json_lib` folder. This script will generate a copy and will prompt you for inputs. Configurations are stored in the `/conf` folder. If you prefer to generate your own json file, copy `/json_lib/dns_spec.json`, paste into `/conf/dns_spec.json` and edit directly using vi editor. Alternatively, if you've created one already, simply upload it to `/conf/dns_spec.json`.    
+
+**WARNING: Do not edit or remove any of the files in /json_lib. Copy only.**
 ```
 sudo python3 hesiod-theogony.py -m1
 ```  

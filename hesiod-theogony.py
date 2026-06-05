@@ -64,9 +64,9 @@ def help_menu():
     print("")
     print("")
 
-def import_configuration_parameters():
+def import_lab_configuration_parameters():
     # Check for Required Configuration Parameters
-    liblog.print_logs("Checking for required configuration parameters.")
+    liblog.print_logs("Checking for required lab configuration parameters.")
     lab_spec_doesexist = libfile.check_if_file_exists("conf/lab_spec.json")
 
     # Import Configuration Parameters
@@ -77,7 +77,7 @@ def import_configuration_parameters():
         liblog.print_logs("lab_spec_py variable populated.")
         liblog.print_logs("Validation check: "+lab_spec_py["validation_check"])
         return lab_spec_py
-    else:
+    if lab_spec_doesexist == 0:
         print("")
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("    ERR: lab_spec.json does not exist in the /conf folder. To resolve this you have two options:")
@@ -85,6 +85,29 @@ def import_configuration_parameters():
         print("        Option 2: Rerun this script using the -m1 parameter. This will launch a prompt wizard that will populate conf/lab_spec.json for you.")
         print("")
         print("        If you have already completed Module 1, upload the json file to conf/lab_spec.json and run again.")
+        print("")
+        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+        print("")
+
+def import_dns_configuration_parameters():
+    # Check for Required Configuration Parameters
+    liblog.print_logs("Checking for required dns configuration parameters.")
+    dns_spec_doesexist = libfile.check_if_file_exists("conf/dns_spec.json")
+    if dns_spec_doesexist == 1:
+        liblog.print_logs("DNS_SPEC CHECK: exists.")
+        dns_spec_str = libjson.populate_var_from_json_file("conf", "dns_spec.json")
+        dns_spec_py = libjson.load_json_variable(dns_spec_str)
+        liblog.print_logs("lab_spec_py variable populated.")
+        liblog.print_logs("Validation check: "+dns_spec_py["validation_check"])
+        return dns_spec_py
+    if dns_spec_doesexist == 1:
+        print("")
+        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
+        print("    ERR: dns_spec.json does not exist in the /conf folder. To resolve this you have two options:")
+        print("        Option 1: Manually copy the contents from json_lib/dns_spec.json and paste into conf/dns_spec.json. Edit conf/dns_spec.json accordingly.")
+        print("        Option 2: Rerun this script using the -m1 parameter. This will launch a prompt wizard that will populate conf/dns_spec.json for you.")
+        print("")
+        print("        If you have already completed Module 1, upload the json file to conf/dns_spec.json and run again.")
         print("")
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("")
@@ -115,7 +138,7 @@ def m2():
     print("=========================================================")
     print("Launching Theogony: MODULE 2 (11min)")
     print("=========================================================")
-    lab_spec_py = import_configuration_parameters()
+    lab_spec_py = import_lab_configuration_parameters()
     libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
     libos.setup_hesiod_k8_nodes(lab_spec_py)
     print("=========================================================")
@@ -130,6 +153,15 @@ def m3():
     print("=========================================================")
     print("Launching Theogony: MODULE 3")
     print("=========================================================")
+    dns_spec_py = import_dns_configuration_parameters()
+    libos.setup_os_for_technitium(dns_spec_py)
+    print("=========================================================")
+    print("Module 3 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
 
 def m4():
     print("=========================================================")

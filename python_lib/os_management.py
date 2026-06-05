@@ -136,4 +136,31 @@ def setup_hesiod_k8_nodes(lab_spec):
         install_kubernetes(lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"], control_plane_ip, worker_ips, lab_spec["ubuntu_servers"][i]["kubernetes_version"])
         i=i+1
 
-    
+def setup_os_for_technitium(lab_spec, dns_spec):  
+    # Loop through each node
+    i=0
+    while i < len(lab_spec["ubuntu_servers"]):
+        liblog.print_logs("Getting Ubuntu details by servers type: "+lab_spec["ubuntu_servers"][i]["ubuntu_type"])
+        ip_range = libvmw.get_ip_range(lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_start"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_end"])
+        w = 0
+        while w < len(ip_range):
+            # Step 1: replace default /etc/systemd/resolved.conf with scripts_lib/k8_technitium_resolved_conf.script
+            replace_resolved_conf(lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"], ip_range[w])
+            # Step 2: create a symbolic link for /run/systemd/resolv/resolv.conf with /etc/resolv.conf as the destination
+            cmd = "cp $PWD/k8_technitium_resolved_conf.script /etc/systemd/resolved.conf"
+            run_sudo(ip_range[w], cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            # Step 3: reboot
+            cmd = "reboot"
+            run_sudo(ip_range[w], cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            w=w+1
+        i=i+1
+
+def replace_resolved_conf(ssh_username, ssh_password, conn):
+    conn = std.Connection(host=conn, user=ssh_username, connect_kwargs={"password": ssh_password})
+    cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_technitium_resolved_conf.script >> k8_technitium_resolved_conf.script"
+    run_sudo(conn, cmd, ssh_password)
+    cmd = "rm /etc/systemd/resolved.conf"
+    run_sudo(conn, cmd, ssh_password)
+    cmd = "cp $PWD/k8_technitium_resolved_conf.script /etc/systemd/resolved.conf"
+    run_sudo(conn, cmd, ssh_password)
+    return
