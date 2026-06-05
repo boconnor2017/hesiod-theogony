@@ -43,6 +43,7 @@
 
     "ubuntu_servers" : [{
         "ubuntu_type" : "Hesiod K8 Cluster",
+        "kubernetes_version" : "v1.30",
         "deploy_this_many" : 2,
         "naming_convention" : "<Sample: hesvcf-theo>",
         "assign_ip_from_this_network" : 2, 
