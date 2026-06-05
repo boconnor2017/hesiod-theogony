@@ -77,7 +77,7 @@ def import_lab_configuration_parameters():
         liblog.print_logs("lab_spec_py variable populated.")
         liblog.print_logs("Validation check: "+lab_spec_py["validation_check"])
         return lab_spec_py
-    if lab_spec_doesexist == 0:
+    else:
         print("")
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("    ERR: lab_spec.json does not exist in the /conf folder. To resolve this you have two options:")
@@ -100,7 +100,7 @@ def import_dns_configuration_parameters():
         liblog.print_logs("lab_spec_py variable populated.")
         liblog.print_logs("Validation check: "+dns_spec_py["validation_check"])
         return dns_spec_py
-    if dns_spec_doesexist == 1:
+    else:
         print("")
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("    ERR: dns_spec.json does not exist in the /conf folder. To resolve this you have two options:")
@@ -153,8 +153,9 @@ def m3():
     print("=========================================================")
     print("Launching Theogony: MODULE 3")
     print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
     dns_spec_py = import_dns_configuration_parameters()
-    libos.setup_os_for_technitium(dns_spec_py)
+    libos.setup_os_for_technitium(lab_spec_py, dns_spec_py)
     print("=========================================================")
     print("Module 3 runtime is completed.")
     print("=========================================================")

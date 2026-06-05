@@ -144,23 +144,28 @@ def setup_os_for_technitium(lab_spec, dns_spec):
         ip_range = libvmw.get_ip_range(lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_start"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_end"])
         w = 0
         while w < len(ip_range):
+            liblog.print_logs("Prepping node "+str(w)+" ["+ip_range[w]+"] for DNS.")
+            node_conn = std.Connection(host=ip_range[w], user=lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], connect_kwargs={"password": lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"]})
             # Step 1: replace default /etc/systemd/resolved.conf with scripts_lib/k8_technitium_resolved_conf.script
-            replace_resolved_conf(lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"], ip_range[w])
+            liblog.print_logs("(Step 1) Replace resolved.conf.")
+            replace_resolved_conf(node_conn, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
             # Step 2: create a symbolic link for /run/systemd/resolv/resolv.conf with /etc/resolv.conf as the destination
-            cmd = "cp $PWD/k8_technitium_resolved_conf.script /etc/systemd/resolved.conf"
-            run_sudo(ip_range[w], cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            liblog.print_logs("(Step 2) Create Symbolic Link")
+            cmd = "ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf"
+            run_sudo(node_conn, cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
             # Step 3: reboot
+            liblog.print_logs("(Step 3) Reboot")
             cmd = "reboot"
-            run_sudo(ip_range[w], cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            run_sudo(node_conn, cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
             w=w+1
         i=i+1
 
-def replace_resolved_conf(ssh_username, ssh_password, conn):
-    conn = std.Connection(host=conn, user=ssh_username, connect_kwargs={"password": ssh_password})
+def replace_resolved_conf(node_conn, ssh_password):
+    liblog.print_logs("Replacing resolved.conf.")
     cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_technitium_resolved_conf.script >> k8_technitium_resolved_conf.script"
-    run_sudo(conn, cmd, ssh_password)
+    run_sudo(node_conn, cmd, ssh_password)
     cmd = "rm /etc/systemd/resolved.conf"
-    run_sudo(conn, cmd, ssh_password)
+    run_sudo(node_conn, cmd, ssh_password)
     cmd = "cp $PWD/k8_technitium_resolved_conf.script /etc/systemd/resolved.conf"
-    run_sudo(conn, cmd, ssh_password)
+    run_sudo(node_conn, cmd, ssh_password)
     return
