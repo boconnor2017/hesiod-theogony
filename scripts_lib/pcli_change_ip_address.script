@@ -1,0 +1,52 @@
+#!/bin/sh
+
+# Server Input Variables
+$esxi_server_ip_address = "ID:SIV-001"
+$esxi_server_username = "ID:SIV-002"
+$esxi_server_password = "ID:SIV-003"
+
+# VM Input Variables
+$vm_name = "ID:VIV-001"
+
+# OS Input Variables
+$os_server_ethernet = "ID:EIV-001"
+$os_server_ip = "ID:EIV-002"
+$os_server_subnet = "ID:EIV-003"
+$os_server_gateway = "ID:EIV-004"
+$os_server_username = "ID:EIV-005"
+$os_server_password = "ID:EIV-006"
+
+### * * * * * * Try not to change anything below this point * * * * * * * *
+
+# Ignore https cert errors
+Set-PowerCLIConfiguration -InvalidCertificateAction ignore -Confirm:$false
+
+# Connect to the ESXi host and open a session.
+$esxi_server_ip_address | Foreach-Object {Connect-VIserver $_ -User $esxi_server_username -Password $esxi_server_password}
+
+# Establish Keystrokes as a function
+. .\Set-VMKeystrokes.ps1
+
+# Login
+Set-VMKeystrokes -VMName $vm_name -StringInput $os_server_username
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -StringInput $os_server_password
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+
+# Configure Network
+Set-VMKeystrokes -VMName $vm_name -StringInput "sudo ifconfig $os_server_ethernet $os_server_ip netmask $os_server_subnet"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -StringInput $os_server_password
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -StringInput "sudo route add default gateway $os_server_gateway"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $vm_name -ReturnCarriage $true
+Start-Sleep -Seconds 1

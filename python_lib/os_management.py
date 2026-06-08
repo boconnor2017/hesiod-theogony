@@ -49,6 +49,9 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
 def install_package(package_name):
     std.subprocess.check_call(["apt", "-y", "install", "python3-"+package_name])
 
+def pause_python_for_duration(seconds):
+    std.time.sleep(seconds)
+
 def run_sudo(conn, cmd, ssh_password):
     sudopass = std.Responder(
         pattern=r'\[sudo\] password for .*:',
@@ -144,7 +147,7 @@ def setup_os_for_technitium(lab_spec, dns_spec):
         ip_range = libvmw.get_ip_range(lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_start"], lab_spec["ubuntu_servers"][i]["assign_ip_from_this_range_end"])
         w = 0
         while w < len(ip_range):
-            liblog.print_logs("Prepping node "+str(w)+" ["+ip_range[w]+"] for DNS.")
+            liblog.print_logs("Prepping node "+str(w)+": "+lab_spec["ubuntu_servers"][i]["naming_convention"]+"00"+str(w+2)+" ["+ip_range[w]+"] for DNS.")
             node_conn = std.Connection(host=ip_range[w], user=lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], connect_kwargs={"password": lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"]})
             # Step 1: replace default /etc/systemd/resolved.conf with scripts_lib/k8_technitium_resolved_conf.script
             liblog.print_logs("(Step 1) Replace resolved.conf.")
@@ -157,6 +160,10 @@ def setup_os_for_technitium(lab_spec, dns_spec):
             liblog.print_logs("(Step 3) Reboot")
             cmd = "reboot"
             run_sudo(node_conn, cmd, lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            # Step 4: pause to allow reboot to take effect
+            pause_python_for_duration(120)
+            # Step 5: reset ip address (changes after reboot: long term fix needed)
+            libvmw.pcli_change_vm_ip_address(lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["ip_address"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["password"], lab_spec["ubuntu_servers"][i]["naming_convention"]+"00"+str(w+2), "ens192", ip_range[w], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["subnet_mask"], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
             w=w+1
         i=i+1
 

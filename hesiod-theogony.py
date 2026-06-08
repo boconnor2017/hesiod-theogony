@@ -122,6 +122,7 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"import paramiko", "python_lib/standard_imports.py")
     libos.install_package("fabric")
     libfile.append_text_to_file(" \n"+"from fabric import Connection, Group", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from invoke import Responder", "python_lib/standard_imports.py")
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
