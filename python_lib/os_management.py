@@ -16,26 +16,38 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
     workers = std.Group(*worker_ips, user=ssh_username, connect_kwargs={"password": ssh_password})
     liblog.print_logs("Starting Kubernetes Cluster deployment.")
 
-    # Step 1: Run common setup everywhere
+    # Step 1: Change Hostnames
+    k8_type = 0
+    liblog.print_logs("Step 1: changing hostnames of the kubernetes cluster.")
+    replace_etc_hosts(master_conn, k8_type, ssh_password)
+    liblog.print_logs("    Master Hostname Updated.")
+    for worker in workers:
+        k8_type = k8_type+1
+        replace_etc_hosts(workers, k8_type, ssh_password)
+    liblog.print_logs("    Worker Hostnames Updated.")
+    liblog.print_logs("Completed.")
+
+    # Step 2: Run common setup everywhere
     setup_common(master_conn, ssh_password, k8_version)
     for worker in workers:
         setup_common(worker, ssh_password, k8_version)
-    liblog.print_logs("Step 1: common setup completed.")
+    liblog.print_logs("Step 2: common setup completed.")
+    
 
-    # Step 2: Initialize Control Plane
+    # Step 3: Initialize Control Plane
     init_result = run_sudo(master_conn, f"kubeadm init --apiserver-advertise-address={control_plane_ip} --pod-network-cidr=10.244.0.0/16", ssh_password)
     run_sudo(master_conn, "mkdir -p $HOME/.kube", ssh_password)
     run_sudo(master_conn, "cp -i /etc/kubernetes/admin.conf $HOME/.kube/config", ssh_password)
     run_sudo(master_conn, f"chown {ssh_username}:{ssh_username} $HOME/.kube/config", ssh_password)
-    liblog.print_logs("Step 2: initialize control plane completed.")
+    liblog.print_logs("Step 3: initialize control plane completed.")
 
-    # Step 3: Install Pod Network (Flannel CNI)
-    master_conn.run("kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml")
-    liblog.print_logs("Step 3: pod network (Flannel) installation completed.")
-
-    # Step 4: Extract the Join Command
-    token_result = run_sudo(master_conn, "kubeadm token create --print-join-command", ssh_password)
-    join_command = token_result.stdout.strip().split('\n')[-1]
+    # Step 4: Securely generate the join parameters
+    token_out = run_sudo(master_conn, "kubeadm token create", ssh_password)
+    token = token_out.stdout.strip()
+    hash_cmd = "openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'"
+    hash_out = run_sudo(master_conn, hash_cmd, ssh_password)
+    ca_cert_hash = hash_out.stdout.strip()
+    join_command = f"kubeadm join {control_plane_ip}:6443 --token {token} --discovery-token-ca-cert-hash sha256:{ca_cert_hash}"
     liblog.print_logs("Step 4: join command extract completed.")
 
     # Step 5: Join Worker Nodes to Cluster
@@ -43,8 +55,12 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
         run_sudo(worker, join_command, ssh_password)
     liblog.print_logs("Step 5: join worker nodes to cluster completed.")
 
+    # Step 6: Install Pod Network (Flannel CNI)
+    flannel_url = "https://raw.githubusercontent.com/flannel-io/flannel/v0.24.0/Documentation/kube-flannel.yml"
+    master_conn.run(f"kubectl apply -f {flannel_url}")
+    liblog.print_logs("Step 6: pod network (Flannel) installation completed over all active nodes.")
+
     liblog.print_logs("Kubernetes cluster deployment is completed. You can now login to the Master at "+control_plane_ip+" and run 'kubectl get nodes' to verify.")
-    
 
 def install_package(package_name):
     std.subprocess.check_call(["apt", "-y", "install", "python3-"+package_name])
@@ -167,7 +183,18 @@ def setup_os_for_technitium(lab_spec, dns_spec):
             w=w+1
         i=i+1
 
-def replace_resolved_conf(node_conn, ssh_password):
+def replace_etc_hosts(node_conn, k8_type, ssh_password):
+    liblog.print_logs("Replacing /etc/hosts.")
+    cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_etc_hosts.script >> k8_etc_hosts.script"
+    run_sudo(node_conn, cmd, ssh_password)
+    libvmw.search_and_replace_in_file("ID:K8-001", "hesiod-k8-0"+str(k8_type), "k8_etc_hosts.script")
+    cmd = "rm /etc/hosts"
+    run_sudo(node_conn, cmd, ssh_password)
+    cmd = "cp $PWD/k8_etc_hosts.script /etc/hosts"
+    run_sudo(node_conn, cmd, ssh_password)
+    return
+
+def replace_resolved_conf(node_conn, k8_type, ssh_password):
     liblog.print_logs("Replacing resolved.conf.")
     cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_technitium_resolved_conf.script >> k8_technitium_resolved_conf.script"
     run_sudo(node_conn, cmd, ssh_password)

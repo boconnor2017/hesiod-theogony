@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: technitium-dns
+  labels:
+    app: technitium-dns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: technitium-dns
+  template:
+    metadata:
+      labels:
+        app: technitium-dns
+    spec:
+      # ... (rest of the file remains the same)
+      containers:
+      - name: technitium
+        image: technitium/dns-server:latest
+        ports:
+        - containerPort: 53
+          name: dns-udp
+          protocol: UDP
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
+        - containerPort: 5380
+          name: web-ui
+          protocol: TCP
+        # CHANGE THIS FROM 'environment:' TO 'env:'
+        env:
+        - name: DNS_SERVER_ADMIN_PASSWORD
+          value: "ID:DNS-001" 
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/dns
+# ...
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/dns
+      volumes:
+      - name: config-volume
+        hostPath:
+          path: /var/technitium/config # A folder on your Ubuntu host
+          type: DirectoryOrCreate
