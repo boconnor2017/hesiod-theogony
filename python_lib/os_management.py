@@ -20,11 +20,13 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
     k8_type = 0
     liblog.print_logs("Step 1: changing hostnames of the kubernetes cluster.")
     replace_etc_hosts(master_conn, k8_type, ssh_password)
-    liblog.print_logs("    Master Hostname Updated.")
+    liblog.print_logs("Master Hostname Updated.")
+    w = 0  
     for worker in workers:
-        k8_type = k8_type+1
-        replace_etc_hosts(workers, k8_type, ssh_password)
-    liblog.print_logs("    Worker Hostnames Updated.")
+        replace_etc_hosts(worker, (w+1), ssh_password)
+        w=w+1
+
+    liblog.print_logs("Worker Hostnames Updated.")
     liblog.print_logs("Completed.")
 
     # Step 2: Run common setup everywhere
@@ -33,7 +35,6 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
         setup_common(worker, ssh_password, k8_version)
     liblog.print_logs("Step 2: common setup completed.")
     
-
     # Step 3: Initialize Control Plane
     init_result = run_sudo(master_conn, f"kubeadm init --apiserver-advertise-address={control_plane_ip} --pod-network-cidr=10.244.0.0/16", ssh_password)
     run_sudo(master_conn, "mkdir -p $HOME/.kube", ssh_password)
@@ -60,7 +61,7 @@ def install_kubernetes(ssh_username, ssh_password, control_plane_ip, worker_ips,
     master_conn.run(f"kubectl apply -f {flannel_url}")
     liblog.print_logs("Step 6: pod network (Flannel) installation completed over all active nodes.")
 
-    liblog.print_logs("Kubernetes cluster deployment is completed. You can now login to the Master at "+control_plane_ip+" and run 'kubectl get nodes' to verify.")
+    liblog.print_logs("Kubernetes cluster deployment is completed. You can now login to the Master at "+control_plane_ip+" and run 'kubectl get nodes -o wide' to verify.")
 
 def install_package(package_name):
     std.subprocess.check_call(["apt", "-y", "install", "python3-"+package_name])
@@ -184,17 +185,37 @@ def setup_os_for_technitium(lab_spec, dns_spec):
         i=i+1
 
 def replace_etc_hosts(node_conn, k8_type, ssh_password):
-    liblog.print_logs("Replacing /etc/hosts.")
-    cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_etc_hosts.script >> k8_etc_hosts.script"
-    run_sudo(node_conn, cmd, ssh_password)
-    libvmw.search_and_replace_in_file("ID:K8-001", "hesiod-k8-0"+str(k8_type), "k8_etc_hosts.script")
-    cmd = "rm /etc/hosts"
-    run_sudo(node_conn, cmd, ssh_password)
-    cmd = "cp $PWD/k8_etc_hosts.script /etc/hosts"
-    run_sudo(node_conn, cmd, ssh_password)
+    # 1. Define the new hostname clearly
+    new_hostname = f"hesiod-k8-0{k8_type}"
+    liblog.print_logs(f"Node ({k8_type}) Setting hostname to: {new_hostname}")
+
+    # 2. Change the actual system hostname immediately (No reboot required)
+    cmd_hostnamectl = f"hostnamectl set-hostname {new_hostname}"
+    run_sudo(node_conn, cmd_hostnamectl, ssh_password)
+    liblog.print_logs("System hostname updated via hostnamectl.")
+
+    # 3. Download the template /etc/hosts script
+    cmd_download = "curl -s https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_etc_hosts.script > k8_etc_hosts.script"
+    run_sudo(node_conn, cmd_download, ssh_password)
+    liblog.print_logs("k8_etc_hosts.script downloaded from github.")
+
+    # 4. Modify the template with the new hostname
+    cmd_sed = f"sed -i 's/ID:K8-001/{new_hostname}/g' k8_etc_hosts.script"
+    run_sudo(node_conn, cmd_sed, ssh_password)
+    liblog.print_logs("Hostnames populated inside the script file.")
+
+    # 5. Overwrite /etc/hosts safely (Instead of rm + cp, we just overwrite)
+    cmd_mv = "mv k8_etc_hosts.script /etc/hosts"
+    run_sudo(node_conn, cmd_mv, ssh_password)
+    liblog.print_logs("New file moved to /etc/hosts.")
+
+    # 6. Ensure permissions are correct on /etc/hosts
+    cmd_chmod = "chmod 644 /etc/hosts"
+    run_sudo(node_conn, cmd_chmod, ssh_password)
+    
     return
 
-def replace_resolved_conf(node_conn, k8_type, ssh_password):
+def replace_resolved_conf(node_conn, ssh_password):
     liblog.print_logs("Replacing resolved.conf.")
     cmd = "curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/scripts_lib/k8_technitium_resolved_conf.script >> k8_technitium_resolved_conf.script"
     run_sudo(node_conn, cmd, ssh_password)
