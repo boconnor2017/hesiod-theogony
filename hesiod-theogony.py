@@ -13,6 +13,7 @@ from python_lib import file_management as libfile
 from python_lib import os_management as libos
 from python_lib import json_management as libjson 
 from python_lib import vmware as libvmw
+from python_lib import k8_management as libk8
 
 # Local Functions
 def _main_(args):
@@ -124,6 +125,10 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"from fabric import Connection, Group", "python_lib/standard_imports.py")
     libos.install_package("invoke")
     libfile.append_text_to_file(" \n"+"from invoke import Responder", "python_lib/standard_imports.py")
+    libos.install_package("kubernetes")
+    libfile.append_text_to_file(" \n"+"import kubernetes", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes import client, config", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes.client.rest import ApiException", "python_lib/standard_imports.py")
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")

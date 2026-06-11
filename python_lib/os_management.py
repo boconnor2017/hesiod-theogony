@@ -69,13 +69,6 @@ def install_package(package_name):
 def pause_python_for_duration(seconds):
     std.time.sleep(seconds)
 
-def run_sudo(conn, cmd, ssh_password):
-    sudopass = std.Responder(
-        pattern=r'\[sudo\] password for .*:',
-        response=f"{ssh_password}\n"
-    )
-    return conn.run(f"echo '{ssh_password}' | sudo -S {cmd}", hide=True)
-
 def setup_common(conn, ssh_password, k8_version):
     liblog.print_logs("Configuring Kubernetes Prerequisites on connection host.")
     
@@ -150,11 +143,55 @@ def setup_hesiod_k8_nodes(lab_spec):
         while w < len(ip_range):
             if w == 0:
                 control_plane_ip = ip_range[0]
+                control_plane_username = lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"]
+                control_plane_password = lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"]
             else:
                 worker_ips.append(ip_range[w])
             w=w+1
         install_kubernetes(lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"], control_plane_ip, worker_ips, lab_spec["ubuntu_servers"][i]["kubernetes_version"])
         i=i+1
+    # Instantiate client kubectl with authentication to manage new kubernetes cluster on Hesiod Main
+    setup_kubernetes_client_on_hes_main(control_plane_ip, control_plane_username, control_plane_password)
+
+def setup_kubernetes_client_on_hes_main(control_plane_ip, ssh_username, ssh_password):
+    liblog.print_logs("Setting up Kubernetes client on Hesiod Main.")
+    local_home = std.os.path.expanduser("~")
+    local_kube_dir = std.os.path.join(local_home, ".kube")
+    local_config_path = std.os.path.join(local_kube_dir, "config")
+    std.os.makedirs(local_kube_dir, exist_ok=True)
+    liblog.print_logs(f"Connecting to remote control plane ({control_plane_ip}) to fetch kubeconfig.")
+    try:
+        ssh = std.paramiko.SSHClient()
+        # Automates accepting the remote host key
+        ssh.set_missing_host_key_policy(std.paramiko.AutoAddPolicy()) 
+        ssh.connect(control_plane_ip, username=ssh_username, password=ssh_password, look_for_keys=False, allow_agent=False)
+
+        # Use SFTP to download the file directly
+        sftp = ssh.open_sftp()
+        remote_config_path = f"/home/{ssh_username}/.kube/config" # Or /root/.kube/config depending on remote user
+        
+        liblog.print_logs(f"Downloading {remote_config_path} to {local_config_path}")
+        sftp.get(remote_config_path, local_config_path)
+        
+        sftp.close()
+        ssh.close()
+    except Exception as e:
+        liblog.print_logs(f"Failed to fetch kubeconfig over SSH: {e}")
+        return False
+    
+    liblog.print_logs("Initializing Kubernetes Python Client.")
+    try:
+        std.config.load_kube_config(config_file=local_config_path)
+        v1 = std.client.CoreV1Api()
+        # Quick sanity check: List namespaces to prove it works
+        liblog.print_logs("Testing connection. Existing Namespaces:")
+        ns_list = v1.list_namespace()
+        for ns in ns_list.items:
+            print(f" - {ns.metadata.name}")
+        return True
+    except Exception as e:
+        print(f"Failed to initialize or authenticate Kubernetes client: {e}")
+        return False
 
 def setup_os_for_technitium(lab_spec, dns_spec):  
     # Loop through each node
@@ -224,3 +261,37 @@ def replace_resolved_conf(node_conn, ssh_password):
     cmd = "cp $PWD/k8_technitium_resolved_conf.script /etc/systemd/resolved.conf"
     run_sudo(node_conn, cmd, ssh_password)
     return
+
+def run_sudo(conn, cmd, ssh_password):
+    sudopass = std.Responder(
+        pattern=r'\[sudo\] password for .*:',
+        response=f"{ssh_password}\n"
+    )
+    return conn.run(f"echo '{ssh_password}' | sudo -S {cmd}", hide=True)
+
+def run_sudo_local(cmd, sudo_password):
+    """
+    Runs a command locally with sudo, securely passing the password via stdin.
+    """
+    try:
+        # The -S flag tells sudo to read the password from stdin
+        full_cmd = f"sudo -S {cmd}"
+        
+        # We pass the password followed by a newline directly into stdin
+        input_data = f"{sudo_password}\n"
+        
+        result = std.subprocess.run(
+            full_cmd,
+            shell=True,
+            input=input_data,
+            text=True,
+            capture_output=True,
+            check=True
+        )
+        
+        return result
+        
+    except std.subprocess.CalledProcessError as e:
+        print(f"Command failed with exit code {e.returncode}")
+        print(f"Error output: {e.stderr}")
+        raise e
