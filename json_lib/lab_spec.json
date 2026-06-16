@@ -92,5 +92,11 @@
         "deploy_to_this_physical_host" : 0,
         "deploy_to_this_network" : 0,
         "deploy_to__this_datastore" : 0
-    }]
+    }],
+
+    "kubernetes" : {
+        "kube_config_path" : "/root/.kube/config",
+        "metallb_deploy_yaml_name" : "metallb-deploy.yaml",
+        "technitium_deploy_yaml_name" : "technitium-deploy.yaml" 
+    }
 }

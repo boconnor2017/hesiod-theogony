@@ -127,7 +127,7 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"from invoke import Responder", "python_lib/standard_imports.py")
     libos.install_package("kubernetes")
     libfile.append_text_to_file(" \n"+"import kubernetes", "python_lib/standard_imports.py")
-    libfile.append_text_to_file(" \n"+"from kubernetes import client, config", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes import client, config, utils", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n"+"from kubernetes.client.rest import ApiException", "python_lib/standard_imports.py")
     print("=========================================================")
     print("Init completed.")
@@ -143,7 +143,7 @@ def m1():
 
 def m2():
     print("=========================================================")
-    print("Launching Theogony: MODULE 2 (11min)")
+    print("Launching Theogony: MODULE 2 (21min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
@@ -158,11 +158,11 @@ def m2():
 
 def m3():
     print("=========================================================")
-    print("Launching Theogony: MODULE 3")
+    print("Launching Theogony: MODULE 3 (6min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     dns_spec_py = import_dns_configuration_parameters()
-    libos.setup_os_for_technitium(lab_spec_py, dns_spec_py)
+    libos.setup_os_for_technitium(lab_spec_py)
     print("=========================================================")
     print("Module 3 runtime is completed.")
     print("=========================================================")

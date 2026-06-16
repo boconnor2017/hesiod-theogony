@@ -1,0 +1,17 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dns-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ID:DNS-001 # The specific dedicated IP you want for Technitium
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: dns-advertisement
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - dns-ip-pool

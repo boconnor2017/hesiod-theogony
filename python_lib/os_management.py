@@ -8,6 +8,11 @@ from python_lib import standard_imports as std
 from python_lib import logs_and_headers as liblog
 from python_lib import vmware as libvmw
 
+def download_script_from_github(github_raw_url, local_scriptname, sudo_password):
+    liblog.print_logs("Downloading script from github.")
+    cmd = f"curl {github_raw_url} >> {local_scriptname}"
+    run_sudo_local(cmd, sudo_password)
+
 def helloworld():
     print("Works!")
 
@@ -183,7 +188,7 @@ def setup_kubernetes_client_on_hes_main(control_plane_ip, ssh_username, ssh_pass
     try:
         std.config.load_kube_config(config_file=local_config_path)
         v1 = std.client.CoreV1Api()
-        # Quick sanity check: List namespaces to prove it works
+        # Validation Check: List namespaces to prove it works
         liblog.print_logs("Testing connection. Existing Namespaces:")
         ns_list = v1.list_namespace()
         for ns in ns_list.items:
@@ -193,7 +198,7 @@ def setup_kubernetes_client_on_hes_main(control_plane_ip, ssh_username, ssh_pass
         print(f"Failed to initialize or authenticate Kubernetes client: {e}")
         return False
 
-def setup_os_for_technitium(lab_spec, dns_spec):  
+def setup_os_for_technitium(lab_spec):  
     # Loop through each node
     i=0
     while i < len(lab_spec["ubuntu_servers"]):
@@ -217,7 +222,7 @@ def setup_os_for_technitium(lab_spec, dns_spec):
             # Step 4: pause to allow reboot to take effect
             pause_python_for_duration(120)
             # Step 5: reset ip address (changes after reboot: long term fix needed)
-            libvmw.pcli_change_vm_ip_address(lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["ip_address"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["password"], lab_spec["ubuntu_servers"][i]["naming_convention"]+"00"+str(w+2), "ens192", ip_range[w], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["subnet_mask"], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"])
+            libvmw.pcli_change_vm_ip_address(lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["ip_address"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["physical_esxi_servers"][lab_spec["ubuntu_servers"][i]["deploy_to_this_physical_host"]]["use_these_credentials"]]["password"], lab_spec["ubuntu_servers"][i]["naming_convention"]+"00"+str(w+2), "ens192", ip_range[w], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["subnet_mask"], lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["ubuntu_servers"][i]["use_these_credentials"]]["password"], w)
             w=w+1
         i=i+1
 

@@ -28,7 +28,7 @@ def get_ip_range(default_gateway, assign_ip_from_this_range_start, assign_ip_fro
 def hello_world():
     print("Works.")
 
-def pcli_change_vm_ip_address(connect_to_this_esxi_ip, esxi_username, esxi_password, vm_name, os_ethernet, apply_this_ip_address, apply_this_subnet_mask, apply_this_default_gateway, os_username, os_password):
+def pcli_change_vm_ip_address(connect_to_this_esxi_ip, esxi_username, esxi_password, vm_name, os_ethernet, apply_this_ip_address, apply_this_subnet_mask, apply_this_default_gateway, os_username, os_password, counter):
     liblog.print_logs("Initiating pcli_change_vm_ip_address() function for vm "+vm_name+".")
     # Import Keystrokes powershell script
     set_vm_keystrokes_script_name = "Set-VMKeystrokes.ps1"
@@ -40,22 +40,23 @@ def pcli_change_vm_ip_address(connect_to_this_esxi_ip, esxi_username, esxi_passw
     change_ip_address_script_name = "pcli_change_ip_address.script"
     change_ip_address_script_raw = populate_var_from_file("scripts_lib/pcli_change_ip_address.script")
     change_ip_address_script = change_ip_address_script_raw.splitlines()
-    write_script_to_script_file(change_ip_address_script, "pcli_change_ip_address.ps1")
-    liblog.print_logs("pcli_change_ip_address.ps1 script created.")
-    search_and_replace_in_file("ID:SIV-001", connect_to_this_esxi_ip, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:SIV-002", esxi_username, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:SIV-003", esxi_password, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:VIV-001", vm_name, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-001", os_ethernet, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-002", apply_this_ip_address, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-003", apply_this_subnet_mask, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-004", apply_this_default_gateway, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-005", os_username, "pcli_change_ip_address.ps1")
-    search_and_replace_in_file("ID:EIV-006", os_password, "pcli_change_ip_address.ps1")
-    pcli_execute("pcli_change_ip_address.ps1")
+    ch_ip_filename = str(counter)+"pcli_change_ip_address.ps1"
+    write_script_to_script_file(change_ip_address_script, ch_ip_filename)
+    liblog.print_logs(f"{ch_ip_filename} script created.")
+    search_and_replace_in_file("ID:SIV-001", connect_to_this_esxi_ip, ch_ip_filename)
+    search_and_replace_in_file("ID:SIV-002", esxi_username, ch_ip_filename)
+    search_and_replace_in_file("ID:SIV-003", esxi_password, ch_ip_filename)
+    search_and_replace_in_file("ID:VIV-001", vm_name, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-001", os_ethernet, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-002", apply_this_ip_address, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-003", apply_this_subnet_mask, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-004", apply_this_default_gateway, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-005", os_username, ch_ip_filename)
+    search_and_replace_in_file("ID:EIV-006", os_password, ch_ip_filename)
+    pcli_execute(ch_ip_filename)
     liblog.print_logs("Network changes applied.")
     # Cleanup
-    delete_script_file("pcli_change_ip_address.ps1")
+    delete_script_file(ch_ip_filename)
     liblog.print_logs("Finished cleanup. Proceeding to the next vm.")
 
 def pcli_create_ubuntu_server_from_iso(lab_spec):
