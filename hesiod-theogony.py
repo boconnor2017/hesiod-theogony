@@ -20,6 +20,10 @@ def _main_(args):
     liblog.hesiod_print_header()
     update_theo_database()
 
+    if '-init' in args:
+        install_pip_packages()
+        std.sys.exit()
+
     if '--help' in args:
         help_menu()
         std.sys.exit()
@@ -50,7 +54,7 @@ def _main_(args):
 
 def help_menu():
     print("=========================================================")
-    print("Main Menu:")
+    print("Hesiod Main Menu:")
     print("    --help: this menu page")
     print("    -m1: (Module 1) Create Lab Spec JSON file.")
     print("    -m2: (Module 2) Deploy Hesiod K8 Cluster.")
@@ -90,33 +94,17 @@ def import_lab_configuration_parameters():
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("")
 
-def import_dns_configuration_parameters():
-    # Check for Required Configuration Parameters
-    liblog.print_logs("Checking for required dns configuration parameters.")
-    dns_spec_doesexist = libfile.check_if_file_exists("conf/dns_spec.json")
-    if dns_spec_doesexist == 1:
-        liblog.print_logs("DNS_SPEC CHECK: exists.")
-        dns_spec_str = libjson.populate_var_from_json_file("conf", "dns_spec.json")
-        dns_spec_py = libjson.load_json_variable(dns_spec_str)
-        liblog.print_logs("lab_spec_py variable populated.")
-        liblog.print_logs("Validation check: "+dns_spec_py["validation_check"])
-        return dns_spec_py
-    else:
-        print("")
-        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
-        print("    ERR: dns_spec.json does not exist in the /conf folder. To resolve this you have two options:")
-        print("        Option 1: Manually copy the contents from json_lib/dns_spec.json and paste into conf/dns_spec.json. Edit conf/dns_spec.json accordingly.")
-        print("        Option 2: Rerun this script using the -m1 parameter. This will launch a prompt wizard that will populate conf/dns_spec.json for you.")
-        print("")
-        print("        If you have already completed Module 1, upload the json file to conf/dns_spec.json and run again.")
-        print("")
-        print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
-        print("")
-
 def install_pip_packages():
     print("=========================================================")
     print("First time run. Initializing required python packages.")
     print("=========================================================")
+    libfile.append_text_to_file(" \n"+"import requests", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import urllib3", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import urllib", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import time", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import os", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from datetime import datetime", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import yaml", "python_lib/standard_imports.py")
     libos.install_package("docker")
     libfile.append_text_to_file(" \n"+"import docker", "python_lib/standard_imports.py")
     libos.install_package("paramiko")
@@ -127,8 +115,12 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"from invoke import Responder", "python_lib/standard_imports.py")
     libos.install_package("kubernetes")
     libfile.append_text_to_file(" \n"+"import kubernetes", "python_lib/standard_imports.py")
-    libfile.append_text_to_file(" \n"+"from kubernetes import client, config, utils", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes import client, config, utils, watch, dynamic", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n"+"from kubernetes.client.rest import ApiException", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes.dynamic.exceptions import ResourceNotFoundError", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import tempfile", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
@@ -161,8 +153,8 @@ def m3():
     print("Launching Theogony: MODULE 3 (6min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
-    dns_spec_py = import_dns_configuration_parameters()
     libos.setup_os_for_technitium(lab_spec_py)
+    libk8.deploy_technitium(lab_spec_py)
     print("=========================================================")
     print("Module 3 runtime is completed.")
     print("=========================================================")

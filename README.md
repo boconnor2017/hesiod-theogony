@@ -45,12 +45,12 @@ Step 4: Navigate to `/usr/local/hesiod-theogony` working directory.
 cd /usr/local/hesiod-theogony
 ```
 
-Step 5: Run `hesiod-theogony` python script using the `--help` parameter.
+Step 5: Run `hesiod-theogony` python script using the `-init` parameter. This will initialize the Theogony modules below with necessary python packages.
 ```
-sudo python3 hesiod-theogony.py --help
+sudo python3 hesiod-theogony.py -init
 ```   
 
-From this point forward, running the `hesiod-theogony` python script on this prepped Ubuntu Server will be referred to as using the **Hesiod Main Appliance**.
+You have now deployed the **Hesiod Main Appliance**. Run `sudo python3 hesiod-theogony.py --help` for details.
 
 # Modules: Deploy a VMware Lab Environment
 Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly.

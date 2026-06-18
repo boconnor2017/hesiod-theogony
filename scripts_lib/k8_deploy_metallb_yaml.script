@@ -5,12 +5,12 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - ID:DNS-001 # The specific dedicated IP you want for Technitium
+  - ID:DNS-001-ID:DNS-002
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: dns-advertisement
+  name: dns-l2-advert
   namespace: metallb-system
 spec:
   ipAddressPools:

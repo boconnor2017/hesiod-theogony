@@ -19,7 +19,13 @@
     "domain" : {
         "name" : "<sample: hesiod.local>",
         "server_ips" : ["8.8.8.8"],
-        "ntp" : "pool.ntp.org"
+        "ntp" : "pool.ntp.org",
+        "fqdns" : [{
+            "naming_convention" : "<sample: hesvcf>",
+            "assign_ip_from_this_network" : 1, 
+            "assign_ip_from_this_range_start" : "10",
+            "assign_ip_from_this_range_end" : "20"
+        }]
     },
 
     "network" : [{
