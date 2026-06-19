@@ -14,6 +14,7 @@ from python_lib import os_management as libos
 from python_lib import json_management as libjson 
 from python_lib import vmware as libvmw
 from python_lib import k8_management as libk8
+from python_lib import dns_management as libdns
 
 # Local Functions
 def _main_(args):
@@ -48,6 +49,10 @@ def _main_(args):
         m5()
         std.sys.exit()
 
+    if '-m6' in args:
+        m6()
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -57,10 +62,11 @@ def help_menu():
     print("Hesiod Main Menu:")
     print("    --help: this menu page")
     print("    -m1: (Module 1) Create Lab Spec JSON file.")
-    print("    -m2: (Module 2) Deploy Hesiod K8 Cluster.")
+    print("    -m2: (Module 2) Deploy Hesiod Kubernetes Services (HKS) Cluster.")
     print("    -m3: (Module 3) Deploy Technitium DNS Server.")
-    print("    -m4: (Module 4) Create VCF Spec JSON file.")
+    print("    -m4: (Module 4) Create DNS Zone and FQDNs for VCF.")
     print("    -m5: (Module 5) Deploy VCF 9.1 Ready Nested ESXi Hosts")
+    print("    -m6: (Module 6) Deploy VCF 9.1 Fleet Management Domain")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -150,7 +156,7 @@ def m2():
 
 def m3():
     print("=========================================================")
-    print("Launching Theogony: MODULE 3 (6min)")
+    print("Launching Theogony: MODULE 3 (10min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     libos.setup_os_for_technitium(lab_spec_py)
@@ -167,10 +173,24 @@ def m4():
     print("=========================================================")
     print("Launching Theogony: MODULE 4")
     print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    libdns.refresh_vcf_dns_entries(lab_spec_py)
+    print("=========================================================")
+    print("Module 4 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
 
 def m5():
     print("=========================================================")
     print("Launching Theogony: MODULE 5")
+    print("=========================================================")
+
+def m6():
+    print("=========================================================")
+    print("Launching Theogony: MODULE 6")
     print("=========================================================")
 
 def update_theo_database():
