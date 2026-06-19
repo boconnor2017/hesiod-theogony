@@ -87,6 +87,12 @@ echo "--> Installing PowerCLI"
 cp /usr/local/hesiod-theogony/ubuntu/install_powercli_ubuntu.ps1 $PWD
 pwsh install_powercli_ubuntu.ps1
 
+# 10. Install Kubernetes Client
+echo "--> Installing Kubernetes Client"
+sudo curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+kubectl version --client
+
 echo "=========================================================================="
 echo " Bootstrap Complete!"
 echo "=========================================================================="

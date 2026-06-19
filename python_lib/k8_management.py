@@ -94,6 +94,35 @@ def create_namespace(local_kube_config_path, namespace):
         else:
             liblog.print_logs(f"Exception when creating namespace: {e}")
 
+def delete_validating_webhook(local_kube_config_path, webhook_name):
+    """
+    Deletes a cluster-scoped ValidatingWebhookConfiguration if it exists.
+    """
+    # Load the cluster credentials
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    
+    # Initialize the Admissionregistration API client
+    admission_api = std.client.AdmissionregistrationV1Api()
+    
+    try:
+        liblog.print_logs(f"Attempting to delete webhook configuration: {webhook_name}")
+        
+        # Execute the deletion request
+        admission_api.delete_validating_webhook_configuration(name=webhook_name)
+        
+        liblog.print_logs(f"Successfully deleted validating webhook: {webhook_name}")
+        
+    except std.ApiException as e:
+        # If it's a 404, the webhook isn't there (which is perfectly fine for a clean install)
+        if e.status == 404:
+            liblog.print_logs(f"Webhook '{webhook_name}' not found. Skipping deletion.")
+        else:
+            # Re-raise or handle other unexpected API errors (e.g., 401 Unauthorized, 403 Forbidden)
+            liblog.print_logs(f"Failed to delete webhook due to API error ({e.status}): {e.reason}")
+            raise e
+    except Exception as e:
+        liblog.print_logs(f"Unexpected error while deleting webhook: {e}")
+        raise e
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")
@@ -112,14 +141,13 @@ def deploy_technitium(lab_spec):
     # Step 3: Install core Metallb
     liblog.print_logs("(Step 3) Install core metallb.")
     install_core_metallb(lab_spec["kubernetes"]["kube_config_path"])
-    
-    # Step 4: Monitor pods, pause until they are all "Running" state
-    # sudo kubectl --kubeconfig=/root/.kube/config get pods -n metallb-system
-    liblog.print_logs("(Step 4) Monitoring metallb pods until they are running.")
     pause_for_pods_until_running(lab_spec["kubernetes"]["kube_config_path"], "metallb-system", 300)
+    liblog.print_logs("Pausing 30 seconds for MetalLB webhook initialization...")
+    std.time.sleep(30)
+    liblog.print_logs("Nap is over. Back to work!")
     
-    # Step 5: Replace in script file: k8_deploy_metallb_yaml.script
-    liblog.print_logs("(Step 5) Generate deploy_metallb.yaml file.")
+    # Step 4: Replace in script file: k8_deploy_metallb_yaml.script
+    liblog.print_logs("(Step 4) Generate deploy_metallb.yaml file.")
     set_metallb_yaml_script_name = "deploy_metallb.yaml"
     set_metallb_yaml_script_raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_metallb_yaml.script")
     set_metallb_yaml_script = set_metallb_yaml_script_raw.splitlines()
@@ -130,8 +158,8 @@ def deploy_technitium(lab_spec):
     libvmw.search_and_replace_in_file("ID:DNS-001", ip_range[0], set_metallb_yaml_script_name)
     libvmw.search_and_replace_in_file("ID:DNS-002", ip_range[len(ip_range)-1], set_metallb_yaml_script_name)
 
-    # Step 6: Replace in script file: k8_deploy_technitium_dns_yaml.script
-    liblog.print_logs("(Step 6) Generate deploy_technitium_dns.yaml file.")
+    # Step 5: Replace in script file: k8_deploy_technitium_dns_yaml.script
+    liblog.print_logs("(Step 5) Generate deploy_technitium_dns.yaml file.")
     set_technitium_yaml_script_name = "deploy_technitium_dns.yaml"
     set_technitium_yaml_script_raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_technitium_dns_yaml.script")
     set_technitium_yaml_script = set_technitium_yaml_script_raw.splitlines()
@@ -140,18 +168,30 @@ def deploy_technitium(lab_spec):
     i=0 # Hardcoded: will only create one DNS server from the dns range, and it will be the first on the list.
     libvmw.search_and_replace_in_file("ID:DNS-001", lab_spec["domain"]["server_ips"][i], set_technitium_yaml_script_name)
     
-    # Step 7: Deploy metallb
+    # Step 6: Deploy metallb
     # sudo kubectl --kubeconfig=/root/.kube/config apply -f deploy-metallb.yaml
-    liblog.print_logs("(Step 7) Deploy metallb.")
+    liblog.print_logs("(Step 6) Deploy metallb and apply custom metallb network configuration to the newly built cluster..")
+    # Cleanup existing webhooks
+    try:
+        liblog.print_logs("Removing old validating webhook to prevent API deadlocks.")
+        # If your library has a custom command or generic delete function, use it here.
+        # Equivalent to: kubectl delete validatingwebhookconfiguration metallb-webhook-configuration --ignore-not-found
+        delete_validating_webhook(lab_spec["kubernetes"]["kube_config_path"], "metallb-webhook-configuration")
+    except Exception as e:
+        liblog.print_logs(f"Webhook deletion skipped or not found: {e}")
     apply_from_yaml(lab_spec["kubernetes"]["kube_config_path"], set_metallb_yaml_script_name, "metallb-system")
     pause_for_pods_until_running(lab_spec["kubernetes"]["kube_config_path"], "metallb-system", 300)
+    pool_summary = get_metallb_ip_address_pools(lab_spec["kubernetes"]["kube_config_path"])
+    liblog.print_logs("Verifying metallb ip pools:")
+    liblog.print_logs(pool_summary)
     
     # Step 8: Deploy technitium
     # sudo kubectl --kubeconfig=/root/.kube/config apply -f deploy-technitium-dns.yaml
-    liblog.print_logs("(Step 8) Deploy technitium.")
+    liblog.print_logs("(Step 7) Deploy technitium.")
     apply_from_yaml(lab_spec["kubernetes"]["kube_config_path"], set_technitium_yaml_script_name, "technitium")
     pause_for_pods_until_running(lab_spec["kubernetes"]["kube_config_path"], "technitium", 300)
-    
+
+ 
     # Step 9: Create zone and populate dns entries for VCF
     liblog.print_logs("(Step 9) Create DNS zone and populate DNS entries for VCF.")
 
@@ -204,6 +244,51 @@ def enable_strict_arp_for_metallb(local_kube_config_path):
     except std.yaml.YAMLError as e:
         liblog.print_logs(f"Error parsing the internal kube-proxy YAML configuration: {e}")
 
+def get_metallb_ip_address_pools(local_kube_config_path):
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    custom_api = std.client.CustomObjectsApi()
+    
+    # MetalLB CRD API Details
+    group = "metallb.io"
+    version = "v1beta1"
+    plural = "ipaddresspools"
+    namespace="metallb-system"
+    
+    try:
+        # Fetch all IPAddressPools across the cluster
+        pools = custom_api.list_namespaced_custom_object(
+            group=group, 
+            version=version, 
+            namespace=namespace, 
+            plural=plural
+        )
+        items = pools.get("items", [])
+        
+        if not items:
+            return f"No IPAddressPools found in namespace '{namespace}'."
+            
+        # Build a clean text table header
+        log_output = ["\nActive MetalLB IP Address Pools:", f"{'NAME':<20} {'AUTO ASSIGN':<15} {'ADDRESSES':<30}"]
+        log_output.append("-" * 68)
+        
+        for pool in items:
+            name = pool["metadata"]["name"]
+            spec = pool.get("spec", {})
+            
+            # Extract attributes safely with defaults
+            auto_assign = str(spec.get("autoAssign", True)).lower()
+            addresses = ", ".join(spec.get("addresses", []))
+            
+            log_output.append(f"{name:<20} {auto_assign:<15} [{addresses}]")
+            
+        return "\n".join(log_output)
+
+    except std.ApiException as e:
+        if e.status == 404:
+            return f"Error: Either MetalLB CRDs are missing or namespace '{namespace}' does not exist."
+        return f"Failed to retrieve IPAddressPools due to API error ({e.status}): {e.reason}"
+    except Exception as e:
+        return f"Unexpected error reading IPAddressPools: {e}"
 
 def get_namespaces(local_kube_config_path):
     std.config.load_kube_config(config_file=local_kube_config_path)

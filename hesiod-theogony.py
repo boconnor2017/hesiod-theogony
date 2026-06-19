@@ -135,7 +135,7 @@ def m1():
 
 def m2():
     print("=========================================================")
-    print("Launching Theogony: MODULE 2 (21min)")
+    print("Launching Theogony: MODULE 2 (30min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
