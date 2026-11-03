@@ -100,6 +100,9 @@ def pcli_create_ubuntu_server_from_iso(lab_spec):
             search_and_replace_in_file("ID:EIV-001", ip_range[u], temp_script[u])
             search_and_replace_in_file("ID:EIV-002", lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["subnet_mask"],temp_script[u])
             search_and_replace_in_file("ID:EIV-003", lab_spec["network"][lab_spec["ubuntu_servers"][i]["assign_ip_from_this_network"]]["default_gateway"], temp_script[u])
+            search_and_replace_in_file("ID:EIV-004", lab_spec["ubuntu_servers"][i]["naming_convention"]+"00"+str(u+2), temp_script[u])
+            search_and_replace_in_file("ID:EIV-005", lab_spec["authentication"][0]["username"], temp_script[u]) #Hardcoded to first in JSON list
+            search_and_replace_in_file("ID:EIV-006", lab_spec["authentication"][1]["password"], temp_script[u]) #Hardcoded to first in JSON list
             #todo: pass authentication to ubuntu - right now its hardcoded (code is available already in change ip address script)
             # Build Ubuntu Servers
             liblog.print_logs("Executing script "+temp_script[u])
