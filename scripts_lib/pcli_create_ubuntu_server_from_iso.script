@@ -18,51 +18,72 @@ $vm_network = "ID:VIV-005"
 $ubuntu_server_ip = "ID:EIV-001"
 $ubuntu_server_subnet = "ID:EIV-002"
 $ubuntu_server_gateway = "ID:EIV-003"
-
+$ubuntu_server_hostname = "ID:EIV-004"
+$ubuntu_server_username = "ID:EIV-005"
+$ubuntu_server_password = "ID:EIV-006"
 
 ### * * * * * * Try not to change anything below this point * * * * * * * *
 
 # Ignore https cert errors
+echo "Launching PowerCLI."
 Set-PowerCLIConfiguration -InvalidCertificateAction ignore -Confirm:$false
 
 # Connect to the ESXi host and open a session.
+echo "Connecting to Server."
 $esxi_server_ip_address | Foreach-Object {Connect-VIserver $_ -User $esxi_server_username -Password $esxi_server_password}
 
 # Build Virtual Machine
+echo "Building Virtual Machine."
 New-VM -Name $vm_name -NumCPU $vm_cpu -MemoryMB $vm_memoryMB -NetworkName $vm_network -Datastore $esxi_server_datastore -DiskStorageFormat "Thick" -GuestID "ubuntu64Guest"
 $ubuntu_server_vm = Get-VM -Name $vm_name
 
 # Create CD Drive and attach ESXi ISO
+echo "Creating CD Drive."
 New-CDDrive -VM $ubuntu_server_vm.Name
 $cd_drive_specs = Get-CDDrive -VM $ubuntu_server_vm
 Set-CDDrive -CD $cd_drive_specs -IsoPath $path_to_iso_on_datastore -StartConnected:$true -Confirm:$false
 
 # Expand Virtual Disk Space
+echo "Expanding Virtual Disk."
 $disks = Get-HardDisk -VM $ubuntu_server_vm
 Set-HardDisk -HardDisk $disks[0] -CapacityGB 100 -Confirm:$false
 
 # Start VM
+echo "Starting VM."
 Start-vm -vm $ubuntu_server_vm.Name
 
 # Pause for installation media to load
 Start-Sleep -Seconds 120
 
 # Establish Keystrokes as a function
+echo "Init Keystrokes function."
 . .\Set-VMKeystrokes.ps1
 
 # Install Ubuntu using Keystrokes
+echo "Installing OS with Keystrokes."
+## Set Language to English
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Decline New Installer 
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Select Default Keyboard Layout
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Select Installation Type: Ubuntu Server 
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Network Configuration: Default - change later 
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+## Proxy Address: Default 
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+## Ubuntu Archive Mirror Config - pause to read packages
 Start-Sleep -Seconds 10
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Disk: use entire 100GB disk
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
@@ -75,36 +96,41 @@ Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Storage Config: Default 
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "Hesiod"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod-k8-node"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
-Start-Sleep -Seconds 1
+## Install Config Warning: Continue
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Profile Configuration 
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_hostname
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_hostname
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_username
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_password
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_password
+Start-Sleep -Seconds 1
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
+Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Skip Ubuntu Pro: Default 
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
+## Install OpenSSH
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput " "
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
@@ -113,44 +139,32 @@ Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+## Featured Server Snaps: default - install later 
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
-Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
+Start-Sleep -Seconds 1
 
 # Pause for initial boot process
-Start-Sleep -Seconds 240
+echo "Installation Complete. Pausing for initial boot process (7min)."
+Start-Sleep -Seconds 480
 
 # Reboot
+echo "Reboot using Keystrokes."
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
 Start-Sleep -Seconds 3
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -SpecialKeyInput "KeyDown"
@@ -160,24 +174,27 @@ Start-Sleep -Seconds 10
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 
 # Pause for reboot
+echo "Pausing for reboot."
 Start-Sleep -Seconds 120
 
 # First Time Login
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "hesiod"
+echo "First time login using Keystrokes."
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_username
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_password
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 5
 
 # Install net-tools
+echo "Installing net-tools with Keystrokes."
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo apt install net-tools"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
-Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "VMware123!"
+Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput $ubuntu_server_password
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 
@@ -185,6 +202,7 @@ Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 10
 
 # Configure Network
+echo "Configure Network with Keystrokes."
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo ifconfig ens192 $ubuntu_server_ip netmask $ubuntu_server_subnet"
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
@@ -193,3 +211,5 @@ Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -StringInput "sudo route add def
 Start-Sleep -Seconds 1
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
+#
+echo "Installation Complete!"
