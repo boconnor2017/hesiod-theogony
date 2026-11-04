@@ -160,8 +160,8 @@ Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 Start-Sleep -Seconds 1
 
 # Pause for initial boot process
-echo "Installation Complete. Pausing for initial boot process (7min)."
-Start-Sleep -Seconds 480
+echo "Installation Complete. Pausing for initial boot process (10min)."
+Start-Sleep -Seconds 600
 
 # Reboot
 echo "Reboot using Keystrokes."
@@ -174,8 +174,8 @@ Start-Sleep -Seconds 10
 Set-VMKeystrokes -VMName $ubuntu_server_vm.Name -ReturnCarriage $true
 
 # Pause for reboot
-echo "Pausing for reboot."
-Start-Sleep -Seconds 120
+echo "Pausing for reboot. (10min)"
+Start-Sleep -Seconds 600
 
 # First Time Login
 echo "First time login using Keystrokes."
