@@ -1,7 +1,7 @@
 # Description: Primary launch for Theogony
 # Author: Brendan O'Connor
-# Date: June 2026
-# Version: 1.0
+# Date: November 2026
+# Version: 2.0
 
 # Menu:
 #  -help or blank: return menu
@@ -15,6 +15,7 @@ from python_lib import json_management as libjson
 from python_lib import vmware as libvmw
 from python_lib import k8_management as libk8
 from python_lib import dns_management as libdns
+from python_lib import ubuntu as libubuntu
 
 # Local Functions
 def _main_(args):
@@ -127,6 +128,7 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"import tempfile", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
+    libos.install_package("pyvmomi")
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
@@ -144,7 +146,8 @@ def m2():
     print("Launching Theogony: MODULE 2 (30min)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
-    libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
+    #libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
+    libubuntu.create_ubuntu_servers(lab_spec_py)
     libos.setup_hesiod_k8_nodes(lab_spec_py)
     print("=========================================================")
     print("Module 2 runtime is completed.")
