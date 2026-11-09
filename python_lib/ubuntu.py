@@ -4,7 +4,7 @@
 #              No ISO, no ISO customization, no keystrokes. Replaces scripts_lib/pcli_create_ubuntu_server_from_iso.script.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (build-time DNS probing, degraded cloud-init = warning, apt retries)
 #
 # Public functions
 #   create_ubuntu_servers(lab_spec, replace_existing=False)  Build every VM in lab_spec["ubuntu_servers"]. Returns a list of results.
@@ -12,7 +12,8 @@
 #   get_ubuntu_server_specs(lab_spec)                        Resolve lab_spec into one flat dict per VM (names, IPs, sizes, credentials).
 #   create_ubuntu_server(vm_spec, replace_existing=False)    Build one VM from a flat dict.
 #   render_cloud_init(vm_spec, mac=None)                     Return (metadata, userdata) YAML strings without touching vSphere.
-#   wait_for_cloud_init(ip, username, password, timeout_s)   SSH in and block until cloud-init finishes. Raises on error.
+#   wait_for_cloud_init(ip, username, password, timeout_s)   SSH in and block until cloud-init finishes. Raises on error;
+#                                                            exit 2 (degraded, recoverable errors only) is logged as a warning.
 #
 # Every failure raises UbuntuBuildError(stage, message), so the calling module can stop cleanly.
 # Dry run from the repo root (renders cloud-init, no vSphere calls):  python3 -m python_lib.ubuntu conf/lab_spec.json
@@ -85,7 +86,7 @@ def get_ubuntu_server_specs(lab_spec):
             if not group.get("OVA_path"):
                 raise UbuntuBuildError("lab_spec", f"'{group['ubuntu_type']}': OVA_path is missing")
             domain = lab_spec.get("domain", {})
-            dns = [s for s in domain.get("server_ips", []) if _is_ip(s)]
+            dns = group.get("build_dns") or _usable_dns([s for s in domain.get("server_ips", []) if _is_ip(s)])
             for u in range(count):
                 name = group["naming_convention"] + "00" + str(u + 2)  # same naming as os_management.py
                 specs.append({
@@ -123,6 +124,31 @@ def _is_ip(value):
         return True
     except ValueError:
         return False
+
+
+def _dns_answers(server, name="ubuntu.com", timeout=2):
+    """True if `server` answers a DNS query on UDP 53 (stdlib only, no dnspython)."""
+    qname = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+    query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + qname + b"\x00\x01\x00\x01"
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(query, (server, 53))
+            return sock.recvfrom(512)[0][:2] == b"\x12\x34"
+        except OSError:
+            return False
+
+
+def _usable_dns(servers):
+    """Drop DNS servers that don't answer yet (e.g. Technitium, which Module 3 deploys on these nodes)."""
+    live = [s for s in servers if _dns_answers(s)]
+    for s in servers:
+        if s not in live:
+            liblog.print_logs(f"DNS {s} is not answering; leaving it out of the build-time DNS list.")
+    if not live:
+        liblog.print_logs(f"WARNING: none of {servers} answer DNS; using them anyway.")
+        return servers
+    return live
 
 
 # --------------------------------------------------------------------------------------------
@@ -166,6 +192,7 @@ def render_cloud_init(vm_spec, mac=None):
         "resize_rootfs": True,
         "package_update": True,
         "packages": ["net-tools"],
+        "apt": {"conf": 'Acquire::Retries "5";\n'},
     }
     if vm_spec["ntp"]:
         userdata["ntp"] = {"enabled": True, "servers": [vm_spec["ntp"]]}
@@ -194,7 +221,9 @@ def wait_for_cloud_init(ip, username, password, timeout_s=CLOUD_INIT_TIMEOUT):
         raise UbuntuBuildError("cloud_init", f"{ip}: cloud-init still running after {timeout_s}s")
     finally:
         ssh.close()
-    if rc != 0:  # 1 = error, 2 = degraded (recoverable errors)
+    if rc == 2:  # degraded: finished, with recoverable errors only (e.g. a package mirror hiccup)
+        liblog.print_logs(f"WARNING: {ip}: cloud-init finished degraded (recoverable errors):\n{output}")
+    elif rc != 0:
         raise UbuntuBuildError("cloud_init", f"{ip}: cloud-init exit {rc}\n{output}")
     return output
 
