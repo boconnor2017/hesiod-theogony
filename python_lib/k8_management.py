@@ -8,6 +8,7 @@ from python_lib import standard_imports as std
 from python_lib import logs_and_headers as liblog
 from python_lib import os_management as libos
 from python_lib import vmware as libvmw
+from python_lib import dns_management as libdns
 
 def apply_from_yaml_old(local_kube_config_path, yaml_file_path, namespace):
     std.config.load_kube_config(config_file=local_kube_config_path)
@@ -123,6 +124,72 @@ def delete_validating_webhook(local_kube_config_path, webhook_name):
     except Exception as e:
         liblog.print_logs(f"Unexpected error while deleting webhook: {e}")
         raise e
+
+def deploy_lldap(lab_spec):
+    liblog.print_logs("Instantiating deploy_lldap() function.")
+    # Prerequisites: MetalLB (metallb-system) and Technitium (technitium) are already running (Module 3),
+    # and the DNS zone for lab_spec["domain"]["name"] exists (Module 4).
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    lldap_ip = lab_spec["lldap"]["ip_address"]
+    lldap_hostname = lab_spec["lldap"].get("hostname", "ldap")
+    lldap_credentials = lab_spec["authentication"][lab_spec["lldap"]["use_these_credentials"]]
+    domain_name = lab_spec["domain"]["name"]
+    lldap_fqdn = f"{lldap_hostname}.{domain_name}"
+    base_dn = ",".join("dc="+part for part in domain_name.split("."))
+    if len(lldap_credentials["password"]) < 8:
+        raise ValueError("LLDAP requires an admin password of at least 8 characters.")
+
+    # Step 1: Make sure MetalLB can hand out the LLDAP IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+lldap_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, lldap_ip, "lldap-ip-pool")
+
+    # Step 2: Generate deploy_lldap.yaml from scripts_lib/k8_deploy_lldap_yaml.script
+    # Values are JSON-encoded so they are valid quoted YAML scalars regardless of special characters.
+    liblog.print_logs("(Step 2) Generate deploy_lldap.yaml file.")
+    set_lldap_yaml_script_name = "deploy_lldap.yaml"
+    set_lldap_yaml_script_raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_lldap_yaml.script")
+    libvmw.write_script_to_script_file(set_lldap_yaml_script_raw.splitlines(), set_lldap_yaml_script_name)
+    replacements = {
+        "ID:LDAP-001": std.secrets.token_urlsafe(32),   # LLDAP_JWT_SECRET
+        "ID:LDAP-002": std.secrets.token_urlsafe(32),   # LLDAP_KEY_SEED
+        "ID:LDAP-003": lldap_credentials["username"],   # LLDAP_LDAP_USER_DN (admin username)
+        "ID:LDAP-004": lldap_credentials["password"],   # LLDAP_LDAP_USER_PASS
+        "ID:LDAP-005": base_dn,                         # LLDAP_LDAP_BASE_DN
+        "ID:LDAP-006": f"http://{lldap_fqdn}:17170",     # LLDAP_HTTP_URL
+        "ID:LDAP-007": lldap_ip,                        # metallb.io/loadBalancerIPs
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), set_lldap_yaml_script_name)
+    liblog.print_logs(f"{set_lldap_yaml_script_name} created. Base DN: {base_dn}")
+
+    # Step 3: Deploy LLDAP
+    # The Secret is only created on the first run (409 = skipped afterwards), so the key seed stays stable
+    # across re-runs. The generated yaml holds secrets, so remove it once applied.
+    liblog.print_logs("(Step 3) Deploy LLDAP.")
+    try:
+        apply_from_yaml(kube_config_path, set_lldap_yaml_script_name, "lldap")
+    finally:
+        libvmw.delete_script_file(set_lldap_yaml_script_name)
+    pause_for_pods_until_running(kube_config_path, "lldap", 300)
+    service_ip = get_load_balancer_ip(kube_config_path, "lldap", "lldap-service")
+    liblog.print_logs(f"LLDAP service external IP: {service_ip}")
+
+    # Step 4: Register LLDAP in Technitium DNS
+    liblog.print_logs("(Step 4) Register "+lldap_fqdn+" in Technitium DNS.")
+    try:
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, lldap_fqdn, domain_name, lldap_ip)
+            liblog.print_logs("    Added A record: "+lldap_fqdn+" -> "+lldap_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, LLDAP is still deployed: {e}")
+
+    liblog.print_logs(f"LLDAP deployed. Web UI: http://{lldap_fqdn}:17170  LDAP: ldap://{lldap_fqdn}:3890  Base DN: {base_dn}")
+    return lldap_ip
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")
@@ -243,6 +310,66 @@ def enable_strict_arp_for_metallb(local_kube_config_path):
         liblog.print_logs(f"Kubernetes API Exception: {e}")
     except std.yaml.YAMLError as e:
         liblog.print_logs(f"Error parsing the internal kube-proxy YAML configuration: {e}")
+
+def ensure_metallb_ip_is_assignable(local_kube_config_path, ip_address, pool_name):
+    # MetalLB only honors a metallb.io/loadBalancerIPs annotation if the IP sits inside an IPAddressPool.
+    # If no existing pool covers the IP, create a dedicated single-IP pool (autoAssign off) + L2Advertisement.
+    # Pools are not allowed to overlap, so never create a new pool for an IP that is already covered.
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    custom_api = std.client.CustomObjectsApi()
+    group, version, namespace = "metallb.io", "v1beta1", "metallb-system"
+    target_ip = std.ipaddress.ip_address(ip_address)
+
+    pools = custom_api.list_namespaced_custom_object(group=group, version=version, namespace=namespace, plural="ipaddresspools")
+    for pool in pools.get("items", []):
+        for address in pool.get("spec", {}).get("addresses", []):
+            if "-" in address:
+                start, end = (std.ipaddress.ip_address(a.strip()) for a in address.split("-"))
+                covered = start <= target_ip <= end
+            else:
+                covered = target_ip in std.ipaddress.ip_network(address.strip(), strict=False)
+            if covered:
+                liblog.print_logs(f"{ip_address} is already covered by MetalLB pool '{pool['metadata']['name']}' ({address}).")
+                liblog.print_logs("    WARNING: make sure no other VM or FQDN in that range uses this IP.")
+                return pool["metadata"]["name"]
+
+    liblog.print_logs(f"No MetalLB pool covers {ip_address}. Creating pool '{pool_name}'.")
+    pool_body = {
+        "apiVersion": f"{group}/{version}",
+        "kind": "IPAddressPool",
+        "metadata": {"name": pool_name, "namespace": namespace},
+        "spec": {"addresses": [f"{ip_address}/32"], "autoAssign": False},
+    }
+    advert_body = {
+        "apiVersion": f"{group}/{version}",
+        "kind": "L2Advertisement",
+        "metadata": {"name": pool_name+"-l2-advert", "namespace": namespace},
+        "spec": {"ipAddressPools": [pool_name]},
+    }
+    for plural, body in (("ipaddresspools", pool_body), ("l2advertisements", advert_body)):
+        try:
+            custom_api.create_namespaced_custom_object(group=group, version=version, namespace=namespace, plural=plural, body=body)
+            liblog.print_logs(f"Created {body['kind']} '{body['metadata']['name']}'.")
+        except std.ApiException as e:
+            if e.status == 409:
+                liblog.print_logs(f"{body['kind']} '{body['metadata']['name']}' already exists. Skipping.")
+            else:
+                raise
+    return pool_name
+
+def get_load_balancer_ip(local_kube_config_path, namespace, service_name, timeout_seconds=120):
+    # Poll the Service until MetalLB has populated status.loadBalancer.ingress.
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    v1 = std.client.CoreV1Api()
+    deadline = std.time.time() + timeout_seconds
+    while std.time.time() < deadline:
+        service = v1.read_namespaced_service(name=service_name, namespace=namespace)
+        ingress = service.status.load_balancer.ingress if service.status.load_balancer else None
+        if ingress:
+            return ingress[0].ip
+        std.time.sleep(5)
+    liblog.print_logs(f"Timed out waiting for an external IP on service {namespace}/{service_name}.")
+    return None
 
 def get_metallb_ip_address_pools(local_kube_config_path):
     std.config.load_kube_config(config_file=local_kube_config_path)

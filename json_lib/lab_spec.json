@@ -100,6 +100,12 @@
         "deploy_to__this_datastore" : 0
     }],
 
+    "lldap" : {
+        "hostname" : "<sample: ldap>",
+        "ip_address" : "<sample: 10.0.1.8>",
+        "use_these_credentials" : 0
+    },
+
     "kubernetes" : {
         "kube_config_path" : "/root/.kube/config",
         "metallb_deploy_yaml_name" : "metallb-deploy.yaml",

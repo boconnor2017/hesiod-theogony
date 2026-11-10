@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lldap
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lldap-secrets
+  namespace: lldap
+type: Opaque
+stringData:
+  LLDAP_JWT_SECRET: ID:LDAP-001
+  LLDAP_KEY_SEED: ID:LDAP-002
+  LLDAP_LDAP_USER_DN: ID:LDAP-003
+  LLDAP_LDAP_USER_PASS: ID:LDAP-004
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lldap
+  namespace: lldap
+  labels:
+    app: lldap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: lldap
+  template:
+    metadata:
+      labels:
+        app: lldap
+    spec:
+      containers:
+      - name: lldap
+        image: lldap/lldap:stable
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: ldap
+          containerPort: 3890
+          protocol: TCP
+        - name: web-http
+          containerPort: 17170
+          protocol: TCP
+        envFrom:
+        - secretRef:
+            name: lldap-secrets
+        env:
+        - name: LLDAP_LDAP_BASE_DN
+          value: ID:LDAP-005
+        - name: LLDAP_HTTP_URL
+          value: ID:LDAP-006
+        - name: TZ
+          value: UTC
+        readinessProbe:
+          tcpSocket:
+            port: 17170
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+      volumes:
+      - name: data-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lldap-service
+  namespace: lldap
+  annotations:
+    metallb.io/loadBalancerIPs: ID:LDAP-007
+spec:
+  type: LoadBalancer
+  selector:
+    app: lldap
+  ports:
+    - name: ldap
+      port: 3890
+      targetPort: 3890
+      protocol: TCP
+    - name: web-http
+      port: 17170
+      targetPort: 17170
+      protocol: TCP
