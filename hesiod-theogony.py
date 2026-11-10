@@ -16,6 +16,7 @@ from python_lib import vmware as libvmw
 from python_lib import k8_management as libk8
 from python_lib import dns_management as libdns
 from python_lib import ubuntu as libubuntu
+from python_lib import ldap_management as libldap
 
 # Local Functions
 def _main_(args):
@@ -201,7 +202,13 @@ def m5():
     print("")
     print("")
     return
+
+def m6():
+    print("=========================================================")
+    print("Launching Theogony: MODULE 6")
+    print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
+    libldap.refresh_vcf_ldap_users(lab_spec_py)
     print("=========================================================")
     print("Module 5 runtime is completed.")
     print("=========================================================")
@@ -209,11 +216,6 @@ def m5():
     print("")
     print("")
     return
-
-def m6():
-    print("=========================================================")
-    print("Launching Theogony: MODULE 6")
-    print("=========================================================")
 
 def update_theo_database():
     liblog.print_logs("Updating theo database.")
