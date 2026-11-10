@@ -112,6 +112,8 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n"+"import os", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n"+"from datetime import datetime", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n"+"import yaml", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import base64", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import secrets", "python_lib/standard_imports.py")
     libos.install_package("docker")
     libfile.append_text_to_file(" \n"+"import docker", "python_lib/standard_imports.py")
     libos.install_package("paramiko")

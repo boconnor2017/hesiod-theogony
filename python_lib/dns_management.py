@@ -22,9 +22,10 @@ def technitium_api(method, ip, endpoint, params, action_description):
         raise RuntimeError("Technitium API error ("+action_description+"): "+error_message)
     return api_json
 
-def change_technitium_password(token, ip, new_password):
-    liblog.print_logs("Changing default password.")
-    return technitium_api("POST", ip, "user/changePassword", {"token": token, "pass": new_password}, "change password")
+def change_technitium_password(token, ip, current_password, new_password):
+    # Current Technitium API: "pass" is the CURRENT password, "newPass" is the new one.
+    liblog.print_logs("Changing default password to "+new_password)
+    return technitium_api("POST", ip, "user/changePassword", {"token": token, "pass": current_password, "newPass": new_password}, "change password")
 
 def check_zone_exists(technitium_token, dns_server_ip, zone_name):
     liblog.print_logs("Checking if zone name "+zone_name+" exists.")
@@ -33,6 +34,24 @@ def check_zone_exists(technitium_token, dns_server_ip, zone_name):
     zone_exists = any(z.get("name", "").lower() == zone_name.lower() for z in zones)
     liblog.print_logs("Zone Exists? "+("Yes." if zone_exists else "No."))
     return zone_exists
+
+def create_tsig_key(technitium_token, dns_server_ip, key_name="tsig-key", algorithm="hmac-sha256"):
+    # Technitium has no dedicated TSIG endpoint: keys live in the server settings.
+    # settings/set "tsigKeys" REPLACES the whole list, so read the existing keys first and append.
+    liblog.print_logs("Creating TSIG key: "+key_name+" ("+algorithm+")")
+    settings_json = technitium_api("GET", dns_server_ip, "settings/get", {"token": technitium_token}, "get settings")
+    existing_keys = settings_json.get("response", {}).get("tsigKeys") or []
+    for key in existing_keys:
+        if key.get("keyName", "").lower() == key_name.lower():
+            liblog.print_logs("    TSIG key "+key_name+" already exists. Skipping creation.")
+            return {"keyName": key["keyName"], "sharedSecret": key.get("sharedSecret"), "algorithmName": key.get("algorithmName")}
+    shared_secret = std.base64.b64encode(std.secrets.token_bytes(32)).decode()
+    new_key = {"keyName": key_name, "sharedSecret": shared_secret, "algorithmName": algorithm}
+    # Pipe-separated table: keyName|sharedSecret|algorithm|keyName|sharedSecret|algorithm...
+    tsig_table = "|".join(f"{k['keyName']}|{k['sharedSecret']}|{k['algorithmName']}" for k in existing_keys + [new_key])
+    technitium_api("POST", dns_server_ip, "settings/set", {"token": technitium_token, "tsigKeys": tsig_table}, "create TSIG key "+key_name)
+    liblog.print_logs("    TSIG key "+key_name+" created.")
+    return new_key
 
 def create_dns_zone(technitium_token, dns_ip, zone_name):
     params = {"token": technitium_token, "zone": zone_name, "type": "Primary"}
@@ -115,14 +134,15 @@ def refresh_vcf_dns_entries(lab_spec):
     # Step 1: Login and get token
     token_runs = get_theo_database()
     if token_runs == 0:
-        #liblog.print_logs("Getting temp token with first time login credentials.")
-        #first_time_password = "admin"
-        #technitium_token = get_technitium_token(lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["username"], first_time_password, dns_server_ip)
-        #liblog.print_logs("Temp Token: "+technitium_token)
-        #pwchg = change_technitium_password(technitium_token, dns_server_ip, lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["password"])
-        #print(pwchg)
+        liblog.print_logs("Getting temp token with first time login credentials.")
+        first_time_password = "admin"
+        technitium_token = get_technitium_token(lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["username"], first_time_password, dns_server_ip)
+        liblog.print_logs("Temp Token: "+technitium_token)
+        change_technitium_password(technitium_token, dns_server_ip, first_time_password, lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["password"])
         technitium_token = get_technitium_token(lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["password"], dns_server_ip)
         liblog.print_logs("Generated Technitium token. Token: "+technitium_token)
+        create_tsig_key(technitium_token, dns_server_ip)
+        liblog.print_logs("Generated TSIG Key.")
     else:
         technitium_token = get_technitium_token(lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["username"], lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]["password"], dns_server_ip)
         liblog.print_logs("Generated Technitium token. Token: "+technitium_token)
@@ -141,3 +161,6 @@ def refresh_vcf_dns_entries(lab_spec):
         liblog.print_logs("    Adding A record: "+fqdn.name+" -> "+fqdn.ip_address)
         createdns_record(technitium_token, dns_server_ip, fqdn.name, zone_name, fqdn.ip_address)
     liblog.print_logs("Finished refreshing "+str(len(fqdn_list))+" DNS entries in zone "+zone_name+".")
+    
+    #Step 4: Update Database
+    update_theo_database() 
