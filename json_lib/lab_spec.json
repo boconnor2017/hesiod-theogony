@@ -79,17 +79,22 @@
         "nested_esxi_type" : "<Select: MGT|VI >",
         "deploy_this_many" : 5,
         "naming_convention" : "<Sample: hesvcf-esx>",
+        "use_these_credentials" : 2,
         "assign_ip_from_this_network" : 1, 
         "assign_ip_from_this_range_start" : "20",
         "assign_ip_from_this_range_end" : "28",
+        "management_vlan_id" : "<Sample: 1610 (0 = untagged)>",
+        "mtu" : "9000",
         "numCPU" : "40",
         "expose_hw_virt_to_guest" : "yes",
+        "allow_legacy_cpu" : "<Select: yes|no (yes for CPUs ESXi 9 lists as deprecated, e.g. Skylake)>",
         "memoryGB" : "320",
+        "numNIC" : "2",
         "harddisks" : [{
-            "storage_GB" : "16"
+            "storage_GB" : "60"
         },
         {
-            "storage_GB" : "40"
+            "storage_GB" : "16"
         },
         {
             "storage_GB" : "1024"
@@ -97,7 +102,7 @@
         "CD_path" : "[datastore1] ISO/VMware-ESXi-9.1.iso",
         "deploy_to_this_physical_host" : 0,
         "deploy_to_this_network" : 0,
-        "deploy_to__this_datastore" : 0
+        "deploy_to_this_datastore" : 0
     }],
 
     "lldap" : {

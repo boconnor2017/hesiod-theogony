@@ -4,13 +4,24 @@ This is a branch from Project Hesiod: https://github.com/boconnor2017/hesiod. **
 
 # Prerequisites
 * At least one physical server running ESXi 9
-* A router (virtual or physical) where you can create subnets
+* A router (virtual or physical) where you can create subnets and BGP peering
 * Appropriate access and entitlements to Broadcom software
-* Ubuntu 64-bit Server ISO
-* ESXi 9.1 ISO
-* SDDC Manager (VCF Installer) 9.1 OVA
 
-# Resource Requirements
+| Module         | Prerequisite                     | Resource Requirements         |
+|----------------|----------------------------------|-------------------------------|
+| Quick Start    | 1x Physical server and 1x Subnet | (see physical server specs below) | 
+| Module 1       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 2       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 3       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 4       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 5       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 6       | (Same as Quick Start)            | (see virtual server specs below)  |
+| Module 7       | VCF 9.1.1 binaries from Broadcom | (see Broadcom specs below)  |
+
+## Physical Server Specs
+
+
+## Virtual Server Specs
 | Component                | vCPU | vMemory (GB) | vStorage (GB) |
 |--------------------------|------|--------------|---------------|
 | Hesiod Main Appliance    | 4    | 16           | 100           |
@@ -23,6 +34,12 @@ This is a branch from Project Hesiod: https://github.com/boconnor2017/hesiod. **
 | Nested ESXi Host 4       | 40   | 320          | 1080          |
 | Nested ESXi Host 5       | 40   | 320          | 1080          |
 | TOTAL:                   | 40   | 1664         | 6614          |
+
+## Broadcom Specs
+|Component            | Type | Module |
+|---------------------|------|--------|
+| ESXi 9.1.1          | ISO  | 7      |
+| VCF 9.1.1 Installer | OVA  | 8      |
 
 # Architecture Summary
 ![img02](img_lib/architecture_summary.png)
@@ -123,6 +140,18 @@ An LDAP server is recommended but not required for your VMware environment. This
         "use_these_credentials" : 0
     },
 
+```
+
+
+You can run this script as many times as you like. Each time the LLDAP Server will be redeployed on HKS. 
+```
+sudo python3 hesiod-theogony.py -m5
+```   
+
+## Module 6: Create LDAP Groups and Users
+This script uses the configuration from `lab_spec.json` in Module 1 to create LDAP Groups and LDAP Users for your VMware environment.
+
+```
 "ldap" : {
     "groups" : [{
         "name" : "<sample: group_01>"
@@ -139,8 +168,58 @@ An LDAP server is recommended but not required for your VMware environment. This
     }
 ```
 
-
-You can run this script as many times as you like. Each time the AD Groups and Users will be overwritten. 
+You can run this script as many times as you like. Each time the AD Groups and Users will be overwritten in LLDAP. 
 ```
-sudo python3 hesiod-theogony.py -m4
-```   
+sudo python3 hesiod-theogony.py -m6
+```  
+
+## Module 7: Deploy Nested ESXi Hosts
+This script uses the configuration from `lab_spec.json` in Module 1 to build a group of VCF-Ready nested ESXi hosts using the ESXi ISO. 
+```
+"nested_esxi_servers" : [{
+        "nested_esxi_type" : "<Select: MGT|VI >",
+        "deploy_this_many" : 5,
+        "naming_convention" : "<Sample: hesvcf-esx>",
+        "use_these_credentials" : 2,
+        "assign_ip_from_this_network" : 1, 
+        "assign_ip_from_this_range_start" : "20",
+        "assign_ip_from_this_range_end" : "28",
+        "management_vlan_id" : "<Sample: 1610 (0 = untagged)>",
+        "mtu" : "9000",
+        "numCPU" : "40",
+        "expose_hw_virt_to_guest" : "yes",
+        "allow_legacy_cpu" : "<Select: yes|no (yes for CPUs ESXi 9 lists as deprecated, e.g. Skylake)>",
+        "memoryGB" : "320",
+        "numNIC" : "2",
+        "harddisks" : [{
+            "storage_GB" : "60"
+        },
+        {
+            "storage_GB" : "16"
+        },
+        {
+            "storage_GB" : "1024"
+        }],
+        "CD_path" : "[datastore1] ISO/VMware-ESXi-9.1.iso",
+        "deploy_to_this_physical_host" : 0,
+        "deploy_to_this_network" : 0,
+        "deploy_to_this_datastore" : 0
+    }]
+```
+
+
+Run the following **AFTER you have uploaded the ESXi ISO to a datastore on the Physical Server**. Use additional parameters `MGT` to build management servers, `VI` to build workload servers, and `--replace` to replace existing servers.
+
+```
+sudo python3 hesiod-theogony.py -m7 MGT
+```  
+
+To deploy nested hosts for VI, run the following.
+```
+sudo python3 hesiod-theogony.py -m7 VI
+```  
+
+To replace existing hosts, run the following.
+```
+sudo python3 hesiod-theogony.py -m7 --replace
+```  

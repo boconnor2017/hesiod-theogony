@@ -17,6 +17,7 @@ from python_lib import k8_management as libk8
 from python_lib import dns_management as libdns
 from python_lib import ubuntu as libubuntu
 from python_lib import ldap_management as libldap
+from python_lib import esxi as libesxi
 
 # Local Functions
 def _main_(args):
@@ -55,6 +56,10 @@ def _main_(args):
         m6()
         std.sys.exit()
 
+    if '-m7' in args:
+        m7(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -69,6 +74,7 @@ def help_menu():
     print("    -m4: (Module 4) Create DNS Zone and FQDNs on Technitium.")
     print("    -m5: (Module 5) Deploy LLDAP on HKS.")
     print("    -m6: (Module 6) Create Users/Groups on LLDAP.")
+    print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart). Optional: MGT or VI to build one type, --replace to rebuild, --dns-ntp to re-apply DNS/NTP only.")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -132,6 +138,8 @@ def install_pip_packages():
     libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
     libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
     libos.install_package("pyvmomi")
+    libos.install_package("cryptography")
+    std.subprocess.check_call(["apt", "-y", "install", "xorriso"])
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
@@ -211,6 +219,30 @@ def m6():
     libldap.refresh_vcf_ldap_users(lab_spec_py)
     print("=========================================================")
     print("Module 5 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
+
+def m7(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 7 (20-30min)")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    types = [t for t in ("MGT", "VI") if t in args] or None
+    try:
+        if "--dns-ntp" in args:  # re-apply DNS + NTP to hosts that are already built
+            libesxi.configure_dns_ntp(lab_spec_py, types=types)
+            return
+        results = libesxi.create_nested_esxi_hosts(lab_spec_py, types=types, replace_existing=("--replace" in args))
+    except libesxi.EsxiBuildError as e:
+        liblog.print_logs("Module 7 stopped: "+str(e))
+        std.sys.exit(1)
+    for r in results:
+        liblog.print_logs("    "+r["fqdn"]+" ("+r["ip"]+")  SHA-256 "+r["ssl_thumbprint"])
+    print("=========================================================")
+    print("Module 7 runtime is completed.")
     print("=========================================================")
     print("")
     print("")

@@ -1,0 +1,63 @@
+# Hesiod nested ESXi kickstart (generic: identical for every host)
+# Per-host values are NOT in this file. %firstboot reads them from the VM's guestinfo
+# advanced settings (guestinfo.hesiod.*), which python_lib/esxi.py writes when it creates the VM.
+
+vmaccepteula
+
+# Boot disk = harddisks[0] on the paravirtual SCSI controller; vSAN disks sit on the NVMe controller
+install --firstdisk=pvscsi,local --overwritevmfs --novmfsondisk
+
+# Temporary bootstrap password; replaced from guestinfo at first boot (before the host has an IP)
+rootpw Hesiod-Bootstrap-91!
+
+network --bootproto=dhcp --device=vmnic0
+
+# --noeject: a virtual CD eject raises a VM question that blocks the reboot
+reboot --noeject
+
+#HESIOD_LEGACY_CPU_POST  (esxi.py swaps this line for a %post block when allow_legacy_cpu is "yes")
+
+%firstboot --interpreter=busybox
+# /var/log lives on the persistent OSData partition, so this log survives the reboot at the end
+LOG=/var/log/hesiod-firstboot.log
+exec >>$LOG 2>&1
+echo "=== Hesiod firstboot $(date) ==="
+gi() { /bin/vmtoolsd --cmd "info-get guestinfo.hesiod.$1" 2>/dev/null; }
+run() { "$@"; rc=$?; echo "rc=$rc: $*"; return $rc; }
+
+FQDN=$(gi fqdn); IP=$(gi ip); MASK=$(gi netmask); GW=$(gi gateway); VLAN=$(gi vlan)
+DNS=$(gi dns); DOMAIN=$(gi domain); NTP=$(gi ntp); MTU=$(gi mtu); PW=$(gi password)
+echo "fqdn=$FQDN ip=$IP/$MASK gw=$GW vlan=$VLAN dns=$DNS ntp=$NTP mtu=$MTU"
+if [ -z "$IP" ] || [ -z "$FQDN" ] || [ -z "$PW" ]; then echo "guestinfo.hesiod.* missing; leaving host unconfigured"; exit 1; fi
+
+# 1. Credentials first, so the host never answers on its real IP with the bootstrap password (not logged)
+esxcli system account set -i root -p "$PW" -c "$PW"; echo "rc=$?: esxcli system account set -i root (password masked)"
+
+# 2. Management VLAN + static IP before DNS/NTP: switching vmk0 from DHCP to static resets DNS settings
+run esxcli network vswitch standard portgroup set -p "Management Network" -v "${VLAN:-0}"
+run esxcli network ip interface ipv4 set -i vmk0 -t static -I "$IP" -N "$MASK"
+run esxcli network ip route ipv4 add -n default -g "$GW"
+run esxcli network ip interface ipv4 get -i vmk0
+
+# 3. Identity, DNS, NTP, SSH (python_lib/esxi.py re-applies and verifies DNS + NTP through the API afterwards)
+run esxcli system hostname set --fqdn="$FQDN"
+for s in $(echo "$DNS" | tr ',' ' '); do run esxcli network ip dns server add --server="$s"; done
+[ -n "$DOMAIN" ] && run esxcli network ip dns search add --domain="$DOMAIN"
+[ -n "$NTP" ] && run esxcli system ntp set --server="$NTP" --enabled=true
+run vim-cmd hostsvc/enable_ssh
+run vim-cmd hostsvc/start_ssh
+run esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1
+
+# 4. Switching: jumbo frames, VM Network VLAN tag (nested NICs sit on a VLAN 4095 trunk)
+[ -n "$MTU" ] && run esxcli network vswitch standard set -v vSwitch0 -m "$MTU"
+esxcli network vswitch standard portgroup list | grep -q "^VM Network " && \
+  run esxcli network vswitch standard portgroup set -p "VM Network" -v "${VLAN:-0}"
+
+# 5. Self-signed certificate that matches the FQDN (VCF validates this).
+#    python_lib/esxi.py treats "served certificate CN == FQDN" as the build-complete signal.
+run /sbin/generate-certificates
+
+# 6. Persist the running configuration BEFORE rebooting (otherwise changes made here can be lost)
+run /sbin/auto-backup.sh
+echo "=== Hesiod firstboot complete; rebooting ==="
+reboot
