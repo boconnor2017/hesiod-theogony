@@ -28,7 +28,7 @@ This is a branch from Project Hesiod: https://github.com/boconnor2017/hesiod. **
 ![img02](img_lib/architecture_summary.png)
 
 # Quick Start: Deploy Hesiod Main Appliance
-Step 1: Deploy Ubuntu 64-bit Server with OpenSSH enabled. Login to the OS with SSH using defined username and password.   
+Step 1: Deploy Ubuntu 64-bit Server with OpenSSH enabled. Login to the OS with SSH.   
 
 Step 2: Download the `prep-ubuntu` bash script. 
 ```
@@ -110,6 +110,37 @@ This script uses the configuration from `lab_spec.json` in Module 1 to create a 
 The first IP address in `assign_ip_from_this_range_start` is reserved for the Technitium DNS server. This IP address is used by MetalLb to expose the `server_ips`[0] IP address that differs from the Kubernetes node. The remaining addresses in the range will be used for the FQDNs. The FQDN is generated automatically using the naming convention and appending a counter with the zone name. For example, in the example above the first FQDN would be `hesvcf01.hesiod.local`, the second `hesvcf02.hesiod.local` and so on until the last IP address from `assign_ip_from_this_range_end` has been assigned.    
 
 You can run this script as many times as you like. Each time the zone and the previous FQDNs will be overwritten. 
+```
+sudo python3 hesiod-theogony.py -m4
+```   
+
+## Module 5: Deploy LLDAP Server
+An LDAP server is recommended but not required for your VMware environment. This script uses the configuration from `lab_spec.json` in Module 1 to deploy a LLDAP Server pod on the HKS cluster from Module 2. Specifically:
+```
+"lldap" : {
+        "hostname" : "<sample: ldap>",
+        "ip_address" : "<sample: 10.0.1.8>",
+        "use_these_credentials" : 0
+    },
+
+"ldap" : {
+    "groups" : [{
+        "name" : "<sample: group_01>"
+    }],
+    "users" : [{
+        "username" : "<sample: user_01>",
+        "display_name" : "",
+        "first_name" : "",
+        "last_name" : "",
+        "email" : "<sample: user_01@hesiod.local",
+        "password" :"<sample: VMware123!>",
+        "add_to_these_groups" : [0]
+        }]
+    }
+```
+
+
+You can run this script as many times as you like. Each time the AD Groups and Users will be overwritten. 
 ```
 sudo python3 hesiod-theogony.py -m4
 ```   

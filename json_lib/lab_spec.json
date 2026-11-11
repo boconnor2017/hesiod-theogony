@@ -106,6 +106,21 @@
         "use_these_credentials" : 0
     },
 
+    "ldap" : {
+        "groups" : [{
+            "name" : "<sample: group_01>"
+        }],
+        "users" : [{
+            "username" : "<sample: user_01>",
+            "display_name" : "",
+            "first_name" : "",
+            "last_name" : "",
+            "email" : "<sample: user_01@hesiod.local",
+            "password" :"<sample: VMware123!>",
+            "add_to_these_groups" : [0]
+        }]
+    },
+
     "kubernetes" : {
         "kube_config_path" : "/root/.kube/config",
         "metallb_deploy_yaml_name" : "metallb-deploy.yaml",
