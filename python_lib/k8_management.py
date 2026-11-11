@@ -289,8 +289,18 @@ def deploy_technitium(lab_spec):
     # Step 8: Deploy technitium
     # sudo kubectl --kubeconfig=/root/.kube/config apply -f deploy-technitium-dns.yaml
     liblog.print_logs("(Step 7) Deploy technitium.")
+    technitium_ip = lab_spec["domain"]["server_ips"][0]
+    # dns-ip-pool has autoAssign off, so the requested IP must sit inside some pool.
+    ensure_metallb_ip_is_assignable(lab_spec["kubernetes"]["kube_config_path"], technitium_ip, "technitium-ip-pool")
+    # apply_from_yaml skips existing resources; recreate a stale Service so it picks up the current annotation.
+    delete_service_if_ip_mismatch(lab_spec["kubernetes"]["kube_config_path"], "technitium", "technitium-dns-service", technitium_ip)
     apply_from_yaml(lab_spec["kubernetes"]["kube_config_path"], set_technitium_yaml_script_name, "technitium")
     pause_for_pods_until_running(lab_spec["kubernetes"]["kube_config_path"], "technitium", 300)
+    service_ip = get_load_balancer_ip(lab_spec["kubernetes"]["kube_config_path"], "technitium", "technitium-dns-service")
+    liblog.print_logs(f"Technitium service external IP: {service_ip}")
+    if service_ip != technitium_ip:
+        raise RuntimeError(f"Technitium service got external IP {service_ip}, expected {technitium_ip}. "
+                           f"Check: kubectl -n technitium describe svc technitium-dns-service")
 
  
     # Step 9: Create zone and populate dns entries for VCF
