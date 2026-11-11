@@ -64,7 +64,7 @@ metadata:
   name: technitium-dns-service
   namespace: technitium
   annotations:
-    metallb.io/loadBalancerIPs: "ID:DNS-001"
+    metallb.universe.tf/loadBalancerIPs: "ID:DNS-001"
 spec:
   type: LoadBalancer
   selector:

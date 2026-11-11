@@ -126,7 +126,7 @@ def delete_validating_webhook(local_kube_config_path, webhook_name):
         raise e
 
 def delete_service_if_ip_mismatch(local_kube_config_path, namespace, service_name, expected_ip):
-    # Deletes the Service when its requested (metallb.io/loadBalancerIPs) or assigned IP differs from expected_ip.
+    # Deletes the Service when its requested (metallb.universe.tf/loadBalancerIPs) or assigned IP differs from expected_ip.
     std.config.load_kube_config(config_file=local_kube_config_path)
     v1 = std.client.CoreV1Api()
     try:
@@ -135,7 +135,7 @@ def delete_service_if_ip_mismatch(local_kube_config_path, namespace, service_nam
         if e.status == 404:
             return False
         raise
-    requested_ip = (service.metadata.annotations or {}).get("metallb.io/loadBalancerIPs")
+    requested_ip = (service.metadata.annotations or {}).get("metallb.universe.tf/loadBalancerIPs")
     ingress = service.status.load_balancer.ingress if service.status.load_balancer else None
     assigned_ip = ingress[0].ip if ingress else None
     if requested_ip == expected_ip and assigned_ip == expected_ip:
@@ -184,7 +184,7 @@ def deploy_lldap(lab_spec):
         "ID:LDAP-004": lldap_credentials["password"],   # LLDAP_LDAP_USER_PASS
         "ID:LDAP-005": base_dn,                         # LLDAP_LDAP_BASE_DN
         "ID:LDAP-006": f"http://{lldap_fqdn}:17170",     # LLDAP_HTTP_URL
-        "ID:LDAP-007": lldap_ip,                        # metallb.io/loadBalancerIPs
+        "ID:LDAP-007": lldap_ip,                        # metallb.universe.tf/loadBalancerIPs
     }
     for placeholder, value in replacements.items():
         libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), set_lldap_yaml_script_name)
@@ -356,7 +356,7 @@ def enable_strict_arp_for_metallb(local_kube_config_path):
         liblog.print_logs(f"Error parsing the internal kube-proxy YAML configuration: {e}")
 
 def ensure_metallb_ip_is_assignable(local_kube_config_path, ip_address, pool_name):
-    # MetalLB only honors a metallb.io/loadBalancerIPs annotation if the IP sits inside an IPAddressPool.
+    # MetalLB only honors a metallb.universe.tf/loadBalancerIPs annotation if the IP sits inside an IPAddressPool.
     # If no existing pool covers the IP, create a dedicated single-IP pool (autoAssign off) + L2Advertisement.
     # Pools are not allowed to overlap, so never create a new pool for an IP that is already covered.
     std.config.load_kube_config(config_file=local_kube_config_path)

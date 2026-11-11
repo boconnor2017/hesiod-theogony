@@ -4,7 +4,7 @@ metadata:
   name: dns-ip-pool
   namespace: metallb-system
 spec:
-  # Only hand out IPs that a Service explicitly requests (metallb.io/loadBalancerIPs);
+  # Only hand out IPs that a Service explicitly requests (metallb.universe.tf/loadBalancerIPs);
   # the rest of this range belongs to VCF appliances.
   autoAssign: false
   addresses:

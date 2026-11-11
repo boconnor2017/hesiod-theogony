@@ -73,7 +73,7 @@ metadata:
   name: lldap-service
   namespace: lldap
   annotations:
-    metallb.io/loadBalancerIPs: ID:LDAP-007
+    metallb.universe.tf/loadBalancerIPs: ID:LDAP-007
 spec:
   type: LoadBalancer
   selector:
