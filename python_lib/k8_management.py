@@ -125,6 +125,34 @@ def delete_validating_webhook(local_kube_config_path, webhook_name):
         liblog.print_logs(f"Unexpected error while deleting webhook: {e}")
         raise e
 
+def delete_service_if_ip_mismatch(local_kube_config_path, namespace, service_name, expected_ip):
+    # Deletes the Service when its requested (metallb.io/loadBalancerIPs) or assigned IP differs from expected_ip.
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    v1 = std.client.CoreV1Api()
+    try:
+        service = v1.read_namespaced_service(name=service_name, namespace=namespace)
+    except std.ApiException as e:
+        if e.status == 404:
+            return False
+        raise
+    requested_ip = (service.metadata.annotations or {}).get("metallb.io/loadBalancerIPs")
+    ingress = service.status.load_balancer.ingress if service.status.load_balancer else None
+    assigned_ip = ingress[0].ip if ingress else None
+    if requested_ip == expected_ip and assigned_ip == expected_ip:
+        return False
+    liblog.print_logs(f"Service {namespace}/{service_name} requests {requested_ip}, has {assigned_ip}; expected {expected_ip}. Deleting so it is recreated.")
+    v1.delete_namespaced_service(name=service_name, namespace=namespace)
+    deadline = std.time.time() + 60
+    while std.time.time() < deadline:
+        try:
+            v1.read_namespaced_service(name=service_name, namespace=namespace)
+            std.time.sleep(2)
+        except std.ApiException as e:
+            if e.status == 404:
+                return True
+            raise
+    raise RuntimeError(f"Timed out waiting for Service {namespace}/{service_name} to be deleted.")
+
 def deploy_lldap(lab_spec):
     liblog.print_logs("Instantiating deploy_lldap() function.")
     # Prerequisites: MetalLB (metallb-system) and Technitium (technitium) are already running (Module 3),
@@ -166,6 +194,9 @@ def deploy_lldap(lab_spec):
     # The Secret is only created on the first run (409 = skipped afterwards), so the key seed stays stable
     # across re-runs. The generated yaml holds secrets, so remove it once applied.
     liblog.print_logs("(Step 3) Deploy LLDAP.")
+    # apply_from_yaml skips existing resources, so a Service left over from an earlier run keeps its old IP.
+    # Deleting it (only if it is on the wrong IP) lets it be recreated with the current annotation; the pod is untouched.
+    delete_service_if_ip_mismatch(kube_config_path, "lldap", "lldap-service", lldap_ip)
     try:
         apply_from_yaml(kube_config_path, set_lldap_yaml_script_name, "lldap")
     finally:
@@ -173,6 +204,9 @@ def deploy_lldap(lab_spec):
     pause_for_pods_until_running(kube_config_path, "lldap", 300)
     service_ip = get_load_balancer_ip(kube_config_path, "lldap", "lldap-service")
     liblog.print_logs(f"LLDAP service external IP: {service_ip}")
+    if service_ip != lldap_ip:
+        raise RuntimeError(f"LLDAP service got external IP {service_ip}, expected {lldap_ip}. "
+                           f"Check: kubectl -n lldap describe svc lldap-service")
 
     # Step 4: Register LLDAP in Technitium DNS
     liblog.print_logs("(Step 4) Register "+lldap_fqdn+" in Technitium DNS.")
