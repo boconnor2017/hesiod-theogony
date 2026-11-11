@@ -32,19 +32,29 @@
         "name" : "<sample: physical esxi management>",
         "default_gateway" : "<sample: 10.0.1.1>",
         "subnet_mask" : "<sample: 255.255.255.0>",
-        "cidr" : "<sample: 24>" 
+        "cidr" : "<sample: 24>",
+        "vlan" : "<sample: 0>" 
     },
     {
         "name" : "<sample: nested esxi management>",
         "default_gateway" : "<sample: 10.0.2.1>",
         "subnet_mask" : "<sample: 255.255.255.0>",
-        "cidr" : "<sample: 24>" 
+        "cidr" : "<sample: 24>",
+        "vlan" : "<sample: 0>" 
     },
     {
         "name" : "<sample: vm management>",
         "default_gateway" : "<sample: 10.0.3.1>",
         "subnet_mask" : "<sample: 255.255.255.0>",
-        "cidr" : "<sample: 24>" 
+        "cidr" : "<sample: 24>",
+        "vlan" : "<sample: 0>" 
+    },
+    {
+        "name" : "<sample: VCF MANAGEMENT/VMOTION/TEP/VSAN>",
+        "default_gateway" : "<sample: 10.0.4.1>",
+        "subnet_mask" : "<sample: 255.255.255.0>",
+        "cidr" : "<sample: 24>",
+        "vlan" : "<sample: 1610>" 
     }],
 
     "ubuntu_servers" : [{
@@ -130,5 +140,27 @@
         "kube_config_path" : "/root/.kube/config",
         "metallb_deploy_yaml_name" : "metallb-deploy.yaml",
         "technitium_deploy_yaml_name" : "technitium-deploy.yaml" 
+    },
+
+    "vcf" : {
+        "components" : [{
+            "name" : "<sample: vcenter>",
+            "assign_ip_from_this_network" : 0
+        }],
+        "naming_convention" : {
+            "root" : "<sample: vcf>",
+            "object" : [{
+                "name" : "datacenter",
+                "value" : "<sample: dc>"
+            },
+            {
+                "name" : "management-cluster",
+                "value" : "<sample: mcl>"
+            },
+            {
+                "name" : "vi-cluster",
+                "value" : "<sample: vcl>"
+            }]
+        }
     }
 }
