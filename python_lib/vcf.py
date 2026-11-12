@@ -4,7 +4,7 @@
 #              Shape of the spec: json_lib/vcf9.1_spec.json.  Values: lab_spec only.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 2.1 (host thumbprints: per-port errors, recorded copy used when SSH is off, e.g. on --retry)
+# Version: 2.2 (vcf.nameservers; preflight checks every nameserver resolves every lab name)
 #
 # IP plan (management network = the nested ESXi hosts' network):
 #   - Every component FQDN gets its own IP, in lab_spec["vcf"]["components"] order, starting right after
@@ -226,7 +226,10 @@ def render_sddc_spec(lab_spec, plan=None, host_thumbprints=True):
     spec["version"] = vcf.get("version", spec.get("version"))
     spec["ceipEnabled"] = False
     spec["workflowType"] = "VCF"
-    spec["dnsSpec"] = {"subdomain": domain["name"], "nameservers": [s for s in domain["server_ips"]][:2]}
+    # Every nameserver VCF gets must resolve the lab domain (the VCF services runtime bootstrap checks each one),
+    # so a public resolver like 8.8.8.8 belongs behind Technitium as a forwarder, not in this list.
+    nameservers = vcf.get("nameservers") or domain["server_ips"]
+    spec["dnsSpec"] = {"subdomain": domain["name"], "nameservers": list(nameservers)[:2]}
     spec["ntpServers"] = [x.strip() for x in str(domain["ntp"]).split(",") if x.strip()]
 
     # Networks (MANAGEMENT = ESXi vmk0, VM_MANAGEMENT = appliances, VMOTION/VSAN with IP ranges)
@@ -405,12 +408,13 @@ def preflight(lab_spec, spec, plan):
     pw = _auth(lab_spec, vcf.get("use_these_credentials"), "vcf_components")["password"]
     add("component password policy", "; ".join(_password_problems(pw)) or None)
 
-    dns_server = domain["server_ips"][0]
     names = [(f["fqdn"], f["ip"]) for p in plan for f in p["fqdns"].values()]
     names += [(h["fqdn"], h["ip"]) for h in libesxi.get_nested_esxi_specs(lab_spec, types=["MGT"])]
     with ThreadPoolExecutor(16) as ex:
-        for (fqdn, ip), problem in zip(names, ex.map(lambda n: _dns_check(dns_server, *n), names)):
-            add(f"DNS {fqdn} <-> {ip}", problem)
+        # every nameserver in the spec must answer for every lab name (not just the first one)
+        for dns_server in spec["dnsSpec"]["nameservers"]:
+            for (fqdn, ip), problem in zip(names, ex.map(lambda n: _dns_check(dns_server, *n), names)):
+                add(f"DNS {fqdn} <-> {ip} via {dns_server}", problem)
         free = [f["ip"] for p in plan for f in p["fqdns"].values()] + [ip for p in plan for ip in p["pool"]]
         for ip, used in zip(free, ex.map(_pings, free)):
             add(f"IP {ip} is free", "something already answers ping on this IP" if used else None)
