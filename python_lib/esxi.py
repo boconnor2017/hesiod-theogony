@@ -10,7 +10,7 @@
 #              Replaces hesiod-vcf9 module 4 (pcli_create_vm_from_iso + Set-VMKeystrokes + pcli_prep_esxi_hosts_for_VCF).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.7 (DNS/NTP: clock corrected before ntpd starts, config saved to the boot bank via auto-backup.sh; check_dns_ntp())
+# Version: 1.8 (nested hosts use vcf.nameservers when set)
 #
 # Public functions
 #   create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False)  Build every host (optionally only "MGT"/"VI").
@@ -93,7 +93,9 @@ def _dns_name_for_ip(lab_spec, ip):
 def get_nested_esxi_specs(lab_spec, types=None):
     specs = []
     domain = lab_spec.get("domain", {})
-    dns = [s for s in domain.get("server_ips", []) if libubuntu._is_ip(s)]  # every server, in lab_spec order
+    # Nested hosts are VCF hosts: use vcf.nameservers when set (every VCF nameserver must resolve the lab domain),
+    # otherwise every domain.server_ips entry, in lab_spec order.
+    dns = [s for s in (lab_spec.get("vcf", {}).get("nameservers") or domain.get("server_ips", [])) if libubuntu._is_ip(s)]
     for group in lab_spec["nested_esxi_servers"]:
         gtype = str(group.get("nested_esxi_type", "")).upper()
         if types and gtype not in [t.upper() for t in types]:
