@@ -10,7 +10,7 @@
 #              Replaces hesiod-vcf9 module 4 (pcli_create_vm_from_iso + Set-VMKeystrokes + pcli_prep_esxi_hosts_for_VCF).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.6 (deploy_to_these_datastores: hosts spread across datastores by free space, swap included)
+# Version: 1.7 (DNS/NTP: clock corrected before ntpd starts, config saved to the boot bank via auto-backup.sh; check_dns_ntp())
 #
 # Public functions
 #   create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False)  Build every host (optionally only "MGT"/"VI").
@@ -40,6 +40,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -435,6 +436,63 @@ def _wait_until_ready(spec, timeout_s=INSTALL_TIMEOUT):
                                        f"Check the VM console and /var/log/hesiod-firstboot.log")
 
 
+MAX_DRIFT_S = 60
+
+
+def _dns_ntp_problems(cm, spec):
+    """Read-only comparison of a host's DNS/NTP/clock with lab_spec. Returns a list of problems (empty = good)."""
+    problems = []
+    got_dns = list(cm.networkSystem.dnsConfig.address or [])
+    if got_dns != spec["dns"]:
+        problems.append(f"DNS servers {got_dns}, expected {spec['dns']}")
+    ntp = [x.strip() for x in str(spec["ntp"]).split(",") if x.strip()]
+    if ntp:
+        got_ntp = list(cm.dateTimeSystem.dateTimeInfo.ntpConfig.server or [])
+        if got_ntp != ntp:
+            problems.append(f"NTP servers {got_ntp}, expected {ntp}")
+        svc = next((x for x in cm.serviceSystem.serviceInfo.service if x.key == "ntpd"), None)
+        if not svc or not svc.running:
+            problems.append("ntpd not running")
+        if svc and svc.policy != "on":
+            problems.append(f"ntpd policy '{svc.policy if svc else None}', expected 'on' (start and stop with host)")
+    drift = (cm.dateTimeSystem.QueryDateTime() - datetime.now(timezone.utc)).total_seconds()
+    if abs(drift) > MAX_DRIFT_S:
+        problems.append(f"clock {drift:+.0f}s off Hesiod Main")
+    return problems
+
+
+def _save_config(spec):
+    """Persist the running config to the boot bank now. ESXi otherwise saves only hourly or on a clean shutdown,
+    so a reset before then silently loses API changes. (No vSphere API call does this; /sbin/auto-backup.sh does.)"""
+    import paramiko
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(spec["ip"], username="root", password=spec["password"], timeout=15,
+                    look_for_keys=False, allow_agent=False)  # paramiko falls back to keyboard-interactive (ESXi)
+        _, out, err = ssh.exec_command("/sbin/auto-backup.sh", timeout=120)
+        rc = out.channel.recv_exit_status()
+        if rc != 0:
+            raise EsxiBuildError("dns_ntp", f"{spec['name']}: auto-backup.sh exit {rc}: {err.read().decode(errors='replace')[-300:]}")
+    except EsxiBuildError:
+        raise
+    except Exception as e:
+        raise EsxiBuildError("dns_ntp", f"{spec['name']}: cannot save config over SSH ({type(e).__name__}: {e}); "
+                                        f"settings are applied but not yet persisted")
+    finally:
+        ssh.close()
+
+
+def check_dns_ntp(spec):
+    """Read-only DNS/NTP/clock check for one running host (used by -m8 preflight)."""
+    si = SmartConnect(host=spec["ip"], user="root", pwd=spec["password"], sslContext=ssl._create_unverified_context())
+    try:
+        host = next(iter(libubuntu._find(si.RetrieveContent(), vim.HostSystem)))
+        return _dns_ntp_problems(host.configManager, spec)
+    finally:
+        Disconnect(si)
+
+
 def _configure_dns_ntp(spec):
     """Set DNS (all domain.server_ips, search domain) and NTP (domain.ntp) on a running host through the vSphere API,
     then read both back. Authoritative: does not depend on what %firstboot managed to do."""
@@ -461,17 +519,21 @@ def _configure_dns_ntp(spec):
                 cm.firewallSystem.EnableRuleset(id="ntpClient")
             except Exception:
                 pass
+            # ntpd will not step a large offset; a new nested VM starts with the physical host's clock.
+            drift = (cm.dateTimeSystem.QueryDateTime() - datetime.now(timezone.utc)).total_seconds()
+            if abs(drift) > MAX_DRIFT_S:
+                cm.dateTimeSystem.UpdateDateTime(dateTime=datetime.now(timezone.utc))
+                liblog.print_logs(f"{spec['fqdn']}: clock was {drift:+.0f}s off; set to Hesiod Main's UTC time before starting ntpd.")
             cm.serviceSystem.UpdateServicePolicy(id="ntpd", policy="on")
             running = any(svc.key == "ntpd" and svc.running for svc in cm.serviceSystem.serviceInfo.service)
             (cm.serviceSystem.RestartService if running else cm.serviceSystem.StartService)(id="ntpd")
 
-        got_dns = list(cm.networkSystem.dnsConfig.address or [])
-        got_ntp = list(cm.dateTimeSystem.dateTimeInfo.ntpConfig.server or [])
-        ntpd_on = any(svc.key == "ntpd" and svc.running for svc in cm.serviceSystem.serviceInfo.service)
-        if got_dns != spec["dns"] or (ntp and (got_ntp != ntp or not ntpd_on)):
-            raise EsxiBuildError("dns_ntp", f"{spec['name']}: read-back mismatch: dns={got_dns} ntp={got_ntp} ntpd_running={ntpd_on}")
-        liblog.print_logs(f"{spec['fqdn']}: DNS {got_dns}, search {dom}, NTP {got_ntp} (ntpd running).")
-        return {"dns": got_dns, "ntp": got_ntp}
+        problems = _dns_ntp_problems(cm, spec)
+        if problems:
+            raise EsxiBuildError("dns_ntp", f"{spec['name']}: read-back mismatch: {'; '.join(problems)}")
+        _save_config(spec)
+        liblog.print_logs(f"{spec['fqdn']}: DNS {spec['dns']}, search {dom}, NTP {ntp} (ntpd running, start with host, saved).")
+        return {"dns": spec["dns"], "ntp": ntp}
     except EsxiBuildError:
         raise
     except Exception as e:
@@ -481,7 +543,7 @@ def _configure_dns_ntp(spec):
 
 
 def configure_dns_ntp(lab_spec, types=None):
-    """Apply DNS and NTP from lab_spec to hosts that are already built (no reinstall)."""
+    """Apply DNS, NTP and clock from lab_spec to hosts that are already built (no reinstall), and save to the boot bank."""
     return [{"name": s["name"], **_configure_dns_ntp(s)} for s in get_nested_esxi_specs(lab_spec, types)]
 
 

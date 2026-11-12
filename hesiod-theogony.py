@@ -80,7 +80,11 @@ def help_menu():
     print("    -m5: (Module 5) Deploy LLDAP on HKS.")
     print("    -m6: (Module 6) Create Users/Groups on LLDAP.")
     print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart). Optional: MGT or VI to build one type, --replace to rebuild, --dns-ntp to re-apply DNS/NTP only.")
-    print("    -m8: (Module 8) VCF Fleet management domain: build spec, preflight, validate on the VCF Installer. --force to validate despite preflight failures.")
+    print("    -m8: (Module 8) VCF Fleet management domain. Default: build spec, preflight, validate on the VCF Installer.")
+    print("         --deploy  validate, then deploy and monitor (attaches if a deployment is already running)")
+    print("         --retry   resume the newest failed deployment with the spec rebuilt from lab_spec")
+    print("         --status  attach to the newest deployment and follow it")
+    print("         --force   continue past local preflight failures")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -259,15 +263,22 @@ def m7(args):
 
 def m8(args):
     print("=========================================================")
-    print("Launching Theogony: MODULE 8 ")
+    print("Launching Theogony: MODULE 8 (VCF Fleet management domain)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     try:
-        result = libvcf.run_pass1(lab_spec_py, force=("--force" in args))
+        if "--deploy" in args:
+            libvcf.deploy(lab_spec_py, force=("--force" in args))
+        elif "--retry" in args:
+            libvcf.retry(lab_spec_py)
+        elif "--status" in args:
+            libvcf.status(lab_spec_py)
+        else:
+            result = libvcf.run_pass1(lab_spec_py, force=("--force" in args))
+            liblog.print_logs("VCF Installer validation result: "+str(result))
     except (libvcf.VcfError, libesxi.EsxiBuildError) as e:
         liblog.print_logs("Module 8 stopped: "+str(e))
         std.sys.exit(1)
-    liblog.print_logs("VCF Installer validation result: "+str(result))
     print("=========================================================")
     print("Module 8 runtime is completed.")
     print("=========================================================")

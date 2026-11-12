@@ -4,7 +4,7 @@
 #              Shape of the spec: json_lib/vcf9.1_spec.json.  Values: lab_spec only.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 2.0 (pass 2: deploy / monitor / retry / status; validation prints nested errors)
 #
 # IP plan (management network = the nested ESXi hosts' network):
 #   - Every component FQDN gets its own IP, in lab_spec["vcf"]["components"] order, starting right after
@@ -18,6 +18,9 @@
 #   preflight(lab_spec, spec)                    Local checks: passwords, DNS fwd/rev, free IPs, gateways, hosts, installer.
 #   validate_sddc_spec(lab_spec, spec)           POST /v1/sddcs/validations and wait for the result.
 #   run_pass1(lab_spec, force=False)             render -> preflight -> validate (what -m8 runs).
+#   deploy(lab_spec, force=False)                pass 1, then POST /v1/sddcs and monitor (-m8 --deploy). Attaches if one is running.
+#   retry(lab_spec)                              resume the newest failed deployment, PATCH /v1/sddcs/{id} (-m8 --retry).
+#   status(lab_spec)                             attach to the newest deployment and follow it (-m8 --status).
 #
 # Every failure raises VcfError(stage, message).
 # Dry run (allocation plan only):  python3 -m python_lib.vcf conf/lab_spec.json
@@ -387,6 +390,12 @@ def preflight(lab_spec, spec, plan):
 
     for h in spec["hostSpecs"]:
         add(f"host {h['hostname']} thumbprints", None if h.get("sslThumbprint") and h.get("sshThumbprint") else "missing")
+    for h in libesxi.get_nested_esxi_specs(lab_spec, types=["MGT"]):
+        try:
+            problems = libesxi.check_dns_ntp(h)
+        except Exception as e:
+            problems = [f"cannot check: {getattr(e, 'msg', None) or e}"]
+        add(f"host {h['fqdn']} DNS/NTP/clock", "; ".join(problems) + " (fix: -m7 --dns-ntp)" if problems else None)
 
     try:
         api = _installer(lab_spec)
@@ -436,6 +445,23 @@ class _Installer:
 
     def get(self, path): return self._call("GET", path)
     def post(self, path, body): return self._call("POST", path, json=body)
+    def patch(self, path, body): return self._call("PATCH", path, json=body)
+
+    def get_patiently(self, path, give_up_s=1800):
+        """GET that rides out installer restarts / network blips during a multi-hour deployment."""
+        deadline = time.time() + give_up_s
+        while True:
+            try:
+                return self.get(path)
+            except (VcfError, requests.RequestException) as e:
+                if time.time() > deadline:
+                    raise VcfError("monitor", f"installer unreachable for {give_up_s}s: {e}")
+                liblog.print_logs(f"  (installer not answering: {str(e)[:120]}; retrying in 60s)")
+                time.sleep(60)
+                try:
+                    self.login()
+                except VcfError:
+                    pass
 
 
 def _installer(lab_spec):
@@ -453,10 +479,12 @@ def _print_checks(checks, depth=0, out=None):
         if status in ("FAILED", "WARNING"):
             msg = c.get("errorResponse", {}) or {}
             text = msg.get("message") or ""
-            fix = msg.get("remediationMessage") or ""
-            liblog.print_logs(f"  {'  ' * depth}{status:7} {c.get('description', '')}{' - ' + text if text else ''}"
-                              f"{' | fix: ' + fix if fix else ''}")
+            liblog.print_logs(f"  {'  ' * depth}{status:7} {c.get('description', '')}{' - ' + text if text else ''}")
             out.append((status, c.get("description", ""), text))
+            for e in msg.get("nestedErrors") or []:  # the installer puts the details here
+                sev = "ERROR  " if str(e.get("errorCode", "")).endswith(".error") else "warning"
+                liblog.print_logs(f"  {'  ' * depth}    {sev} {e.get('message', '')}"
+                                  f"{' | fix: ' + e['remediationMessage'] if e.get('remediationMessage') else ''}")
         _print_checks(c.get("nestedValidationChecks"), depth + 1, out)
     return out
 
@@ -506,6 +534,10 @@ def print_plan(plan):
 
 
 def run_pass1(lab_spec, force=False):
+    return _pass1(lab_spec, force)[0]
+
+
+def _pass1(lab_spec, force=False):
     liblog.print_logs("Building the VCF management domain plan.")
     plan = get_vcf_plan(lab_spec)
     print_plan(plan)
@@ -518,6 +550,135 @@ def run_pass1(lab_spec, force=False):
     if result == "FAILED":
         raise VcfError("validate", f"installer validation failed ({sum(1 for i in issues if i[0] == 'FAILED')} errors); "
                                    f"see the log above and conf/vcf_mgmt_domain_validation.json")
+    return result, spec
+
+
+# --------------------------------------------------------------------------------------------
+# Pass 2: deploy / monitor / retry
+# --------------------------------------------------------------------------------------------
+DEPLOY_TIMEOUT = 16 * 3600
+POLL_S = 60
+DONE = ("COMPLETED_WITH_SUCCESS", "COMPLETED_WITH_FAILURE", "ROLLBACK_SUCCESS")
+
+
+def _tasks(api):
+    elems = api.get_patiently("/v1/sddcs").get("elements") or []
+    return sorted(elems, key=lambda t: t.get("creationTimestamp") or "")
+
+
+def _ours(lab_spec, tasks):
+    """Installer tasks for this lab's vcfInstanceName (or all of them if names are not reported)."""
+    names = _naming(lab_spec)
+    inst = lab_spec["vcf"].get("instance_name", f"{names['root']}-instance-01")
+    mine = [t for t in tasks if t.get("vcfInstanceName") in (inst, None)]
+    return mine or tasks
+
+
+def _summarize_failure(task):
+    for st in task.get("sddcSubTasks") or []:
+        if "FAIL" in str(st.get("status", "")) or st.get("status") == "INTERNAL_ERROR":
+            liblog.print_logs(f"  FAILED: {st.get('description') or st.get('name')}")
+            for e in st.get("errors") or []:
+                liblog.print_logs(f"      {e.get('message', '')}"
+                                  f"{' | fix: ' + e['remediationMessage'] if e.get('remediationMessage') else ''}"
+                                  f"{' | ref ' + e['referenceToken'] if e.get('referenceToken') else ''}")
+
+
+def monitor(lab_spec, task_id, api=None):
+    """Follow a deployment until it finishes. Logs milestone progress and every sub-task start/finish/failure."""
+    api = api or _installer(lab_spec)
+    deadline, seen, seen_ms = time.time() + DEPLOY_TIMEOUT, {}, {}
+    liblog.print_logs(f"Monitoring deployment {task_id} (poll every {POLL_S}s; Ctrl+C is safe: rerun -m8 --status to reattach).")
+    while True:
+        task = api.get_patiently(f"/v1/sddcs/{task_id}")
+        for m in task.get("milestones") or []:
+            key = (m.get("status"), m.get("completedTasks"))
+            if seen_ms.get(m.get("name")) != key:
+                seen_ms[m.get("name")] = key
+                liblog.print_logs(f"  milestone {m.get('description') or m.get('name')}: {m.get('status')} "
+                                  f"({m.get('completedTasks', '?')}/{m.get('totalTasks', '?')})")
+        for st in task.get("sddcSubTasks") or []:
+            k = st.get("name") or st.get("description")
+            if seen.get(k) != st.get("status"):
+                seen[k] = st.get("status")
+                if st.get("status") not in ("INITIALIZED",):
+                    liblog.print_logs(f"    {st.get('status'):28} {st.get('description') or k}")
+        status = task.get("status")
+        if status in DONE:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            with open(os.path.join(OUTPUT_DIR, "vcf_mgmt_domain_deploy_task.json"), "w") as f:
+                json.dump(task, f, indent=2)
+            if status != "COMPLETED_WITH_SUCCESS":
+                _summarize_failure(task)
+                raise VcfError("deploy", f"deployment {task_id} ended {status}. Fix the cause, then: -m8 --retry "
+                                         f"(details: conf/vcf_mgmt_domain_deploy_task.json)")
+            liblog.print_logs(f"Deployment {task_id} COMPLETED_WITH_SUCCESS.")
+            return task
+        if time.time() > deadline:
+            raise VcfError("monitor", f"deployment {task_id} still {status} after {DEPLOY_TIMEOUT // 3600}h; "
+                                      f"rerun -m8 --status to keep watching")
+        time.sleep(POLL_S)
+
+
+def _print_endpoints(lab_spec):
+    for p in get_vcf_plan(lab_spec):
+        for label, f in p["fqdns"].items():
+            if label in ("vcenter", "sddc_manager", "vip", "node1", "hostname", "platform"):
+                liblog.print_logs(f"  {p['component']:25} https://{f['fqdn']}")
+
+
+def status(lab_spec):
+    """Attach to the newest deployment for this lab and follow it (no changes)."""
+    api = _installer(lab_spec)
+    tasks = _ours(lab_spec, _tasks(api))
+    if not tasks:
+        liblog.print_logs("No deployments on this installer yet.")
+        return None
+    t = tasks[-1]
+    liblog.print_logs(f"Newest deployment {t['id']}: {t.get('status')} (created {t.get('creationTimestamp')}).")
+    if t.get("status") == "IN_PROGRESS":
+        return monitor(lab_spec, t["id"], api)
+    if t.get("status") != "COMPLETED_WITH_SUCCESS":
+        _summarize_failure(api.get(f"/v1/sddcs/{t['id']}"))
+    return t
+
+
+def deploy(lab_spec, force=False):
+    """Start the management domain deployment, or attach to one already running. Never starts a second one."""
+    api = _installer(lab_spec)
+    tasks = _ours(lab_spec, _tasks(api))
+    running = [t for t in tasks if t.get("status") == "IN_PROGRESS"]
+    if running:
+        liblog.print_logs(f"Deployment {running[-1]['id']} is already running; attaching.")
+        return monitor(lab_spec, running[-1]["id"], api)
+    if any(t.get("status") == "COMPLETED_WITH_SUCCESS" for t in tasks):
+        liblog.print_logs("This installer already completed a deployment for this lab. Nothing to do.")
+        _print_endpoints(lab_spec)
+        return tasks[-1]
+    if any(t.get("status") in ("COMPLETED_WITH_FAILURE",) for t in tasks):
+        raise VcfError("deploy", "a previous deployment failed on this installer; use -m8 --retry to resume it")
+
+    _, spec = _pass1(lab_spec, force=force)                # render + preflight + validate; deploy this exact spec
+    task = api.post("/v1/sddcs", spec)
+    liblog.print_logs(f"Deployment {task['id']} started ({task.get('status')}). This takes hours on nested hosts.")
+    result = monitor(lab_spec, task["id"], api)
+    _print_endpoints(lab_spec)
+    return result
+
+
+def retry(lab_spec):
+    """Resume the newest failed deployment with the spec rebuilt from lab_spec (PATCH /v1/sddcs/{id}, KB 424770)."""
+    api = _installer(lab_spec)
+    failed = [t for t in _ours(lab_spec, _tasks(api)) if t.get("status") in ("COMPLETED_WITH_FAILURE",)]
+    if not failed:
+        raise VcfError("retry", "no failed deployment to retry on this installer")
+    tid = failed[-1]["id"]
+    spec = render_sddc_spec(lab_spec)
+    liblog.print_logs(f"Retrying deployment {tid} with the spec rebuilt from lab_spec "
+                      f"(redacted copy: {save_spec(spec)}).")
+    api.patch(f"/v1/sddcs/{tid}", spec)
+    result = monitor(lab_spec, tid, api)
+    _print_endpoints(lab_spec)
     return result
 
 
