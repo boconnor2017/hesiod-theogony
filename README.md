@@ -286,10 +286,15 @@ sudo python3 hesiod-theogony.py -m8
 
 Run the installer and deploy the VCF Fleet Management Domain.
 ```
-sudo python3 hesiod-theogony.py -m7 --replace
+sudo python3 hesiod-theogony.py -m8 --deploy
 ``` 
 
 Retry after a failure.
 ```
-sudo python3 hesiod-theogony.py -m7 --retry
+sudo python3 hesiod-theogony.py -m8 --retry
+``` 
+
+Check on status. Note: its normal for this process to take several hours.
+```
+sudo python3 hesiod-theogony.py -m8 --status
 ``` 

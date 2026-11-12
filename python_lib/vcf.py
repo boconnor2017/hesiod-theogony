@@ -4,7 +4,7 @@
 #              Shape of the spec: json_lib/vcf9.1_spec.json.  Values: lab_spec only.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 2.0 (pass 2: deploy / monitor / retry / status; validation prints nested errors)
+# Version: 2.1 (host thumbprints: per-port errors, recorded copy used when SSH is off, e.g. on --retry)
 #
 # IP plan (management network = the nested ESXi hosts' network):
 #   - Every component FQDN gets its own IP, in lab_spec["vcf"]["components"] order, starting right after
@@ -177,6 +177,41 @@ def _ssh_thumbprint(ip, timeout=10):
         t.close()
 
 
+THUMBPRINT_FILE = os.path.join(OUTPUT_DIR, "vcf_host_thumbprints.json")
+
+
+def _host_thumbprints(h):
+    """Read SSL (443) and SSH (22) thumbprints live; record them. If a port refuses (VCF turns SSH off during
+    bring-up, so this is normal on --retry), fall back to the recorded value. Installer validation and retry
+    check thumbprints against the hosts, so a stale recorded value cannot slip through."""
+    try:
+        with open(THUMBPRINT_FILE) as f:
+            recorded = json.load(f)
+    except (OSError, ValueError):
+        recorded = {}
+    rec = recorded.get(h["fqdn"], {})
+    out = {}
+    for kind, port, read in (("ssl", 443, lambda: libesxi._served_cert(h["ip"])[1]),
+                             ("ssh", 22, lambda: _ssh_thumbprint(h["ip"]))):
+        try:
+            out[kind] = read()
+        except Exception as e:
+            if rec.get(kind):
+                liblog.print_logs(f"  WARNING: {h['fqdn']} port {port} ({kind.upper()}) not answering ({e}); "
+                                  f"using the {kind.upper()} thumbprint recorded {rec.get('recorded', '?')}")
+                out[kind] = rec[kind]
+            else:
+                hint = (" SSH is off on this host: start TSM-SSH (host client > Manage > Services) or rerun -m7."
+                        if port == 22 else " Is the host up? (host client / console)")
+                raise VcfError("hosts", f"{h['fqdn']} ({h['ip']}): port {port} ({kind.upper()}): {e}.{hint}")
+    if out != {k: rec.get(k) for k in ("ssl", "ssh")}:
+        recorded[h["fqdn"]] = {**out, "recorded": time.strftime("%Y-%m-%d %H:%M")}
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        with open(THUMBPRINT_FILE, "w") as f:
+            json.dump(recorded, f, indent=2)
+    return out["ssl"], out["ssh"]
+
+
 def render_sddc_spec(lab_spec, plan=None, host_thumbprints=True):
     vcf, domain = lab_spec["vcf"], lab_spec["domain"]
     plan = plan or get_vcf_plan(lab_spec)
@@ -212,16 +247,12 @@ def render_sddc_spec(lab_spec, plan=None, host_thumbprints=True):
         net_specs.append(ns)
     spec["networkSpecs"] = net_specs
 
-    # Hosts: the MGT nested ESXi hosts from Module 7, with live thumbprints
+    # Hosts: the MGT nested ESXi hosts from Module 7, with live thumbprints (recorded copy as fallback)
     hosts = []
     for h in libesxi.get_nested_esxi_specs(lab_spec, types=["MGT"]):
         hs = {"hostname": h["fqdn"].split(".")[0], "credentials": {"username": "root", "password": h["password"]}}
         if host_thumbprints:
-            try:
-                hs["sslThumbprint"] = libesxi._served_cert(h["ip"])[1]
-                hs["sshThumbprint"] = _ssh_thumbprint(h["ip"])
-            except Exception as e:
-                raise VcfError("hosts", f"{h['fqdn']} ({h['ip']}): cannot read thumbprints: {e}")
+            hs["sslThumbprint"], hs["sshThumbprint"] = _host_thumbprints(h)
         hosts.append(hs)
     spec["hostSpecs"] = hosts
 

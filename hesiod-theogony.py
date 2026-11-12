@@ -79,8 +79,12 @@ def help_menu():
     print("    -m4: (Module 4) Create DNS Zone and FQDNs on Technitium.")
     print("    -m5: (Module 5) Deploy LLDAP on HKS.")
     print("    -m6: (Module 6) Create Users/Groups on LLDAP.")
-    print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart). Optional: MGT or VI to build one type, --replace to rebuild, --dns-ntp to re-apply DNS/NTP only.")
-    print("    -m8: (Module 8) VCF Fleet management domain. Default: build spec, preflight, validate on the VCF Installer.")
+    print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart).")
+    print("         MGT to build hosts for a Management cluster")
+    print("         VI to build hosts for a VI cluster")
+    print("         --replace to rebuild")
+    print("         --dns-ntp to re-apply DNS/NTP only")
+    print("    -m8: (Module 8) VCF Fleet management domain. Default: precheck on the VCF Installer.")
     print("         --deploy  validate, then deploy and monitor (attaches if a deployment is already running)")
     print("         --retry   resume the newest failed deployment with the spec rebuilt from lab_spec")
     print("         --status  attach to the newest deployment and follow it")
@@ -166,7 +170,7 @@ def m1():
 
 def m2():
     print("=========================================================")
-    print("Launching Theogony: MODULE 2 (30min)")
+    print("Launching Theogony: MODULE 2")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     #libvmw.pcli_create_ubuntu_server_from_iso(lab_spec_py)
@@ -182,7 +186,7 @@ def m2():
 
 def m3():
     print("=========================================================")
-    print("Launching Theogony: MODULE 3 (10min)")
+    print("Launching Theogony: MODULE 3")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     libos.setup_os_for_technitium(lab_spec_py)
@@ -263,7 +267,7 @@ def m7(args):
 
 def m8(args):
     print("=========================================================")
-    print("Launching Theogony: MODULE 8 (VCF Fleet management domain)")
+    print("Launching Theogony: MODULE 8 (3-4 hours)")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     try:
