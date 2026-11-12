@@ -223,3 +223,73 @@ To replace existing hosts, run the following.
 ```
 sudo python3 hesiod-theogony.py -m7 --replace
 ```  
+
+## Module 8: Deploy VCF Fleet Management Domain
+This script uses the configuration from `lab_spec.json` in Module 1 to build a VCF Fleet Management Domain. 
+```
+"vcf" : {
+    "version" : "9.1.1.0",
+    "use_these_credentials" : 4,
+    "installer" : {
+        "ip_address" : "<sample: 10.0.2.15 (between ubuntu_servers range_end and nested_esxi_servers range_start)>",
+        "use_these_credentials" : 3
+    },
+    "networks" : {
+        "management" : 1,
+        "vm_management" : 1,
+        "vmotion" : { "network" : 3, "range_start" : "10", "range_end" : "50" },
+        "vsan" : { "network" : 3, "range_start" : "60", "range_end" : "100" },
+        "host_tep" : { "network" : 3, "range_start" : "110", "range_end" : "150" }
+    },
+    "components" : [
+        { "name" : "vcenter", "size" : "small" },
+        { "name" : "sddc_manager" },
+        { "name" : "nsx", "count" : 1, "size" : "medium" },
+        { "name" : "vcf_operations", "count" : 1, "size" : "small" },
+        { "name" : "vcf_operations_collector", "size" : "small" },
+        { "name" : "vsp", "size" : "small", "pool_size" : 12 },
+        { "name" : "vidb" },
+        { "name" : "license_server" },
+        { "name" : "fleet_lcm" },
+        { "name" : "sddc_lcm" },
+        { "name" : "vcf_automation", "size" : "small", "pool_size" : 5 }
+    ],
+    "cluster" : {
+        "vsan_type" : "<Select: OSA|ESA>",
+        "failures_to_tolerate" : 1,
+        "vmnics" : ["vmnic0", "vmnic1"]
+    },
+    "naming_convention" : {
+        "root" : "<sample: vcf>",
+        "object" : [{
+            "name" : "datacenter",
+            "value" : "<sample: dc>"
+        },
+        {
+            "name" : "management-cluster",
+            "value" : "<sample: mcl>"
+        },
+        {
+            "name" : "vi-cluster",
+            "value" : "<sample: vcl>"
+        }]
+    }
+}
+```
+
+Run the following **AFTER you have manually deployed the VCF Installer**. Use additional parameters `--deploy` to run the installation or `--retry` to continue an installation after a failure. Without these parameters this module will stop at the precheck. Detailed results of the precheck are stored in `/conf/vcf_management_domain_validation.json`.
+
+Precheck.
+```
+sudo python3 hesiod-theogony.py -m8
+``` 
+
+Run the installer and deploy the VCF Fleet Management Domain.
+```
+sudo python3 hesiod-theogony.py -m7 --replace
+``` 
+
+Retry after a failure.
+```
+sudo python3 hesiod-theogony.py -m7 --retry
+``` 

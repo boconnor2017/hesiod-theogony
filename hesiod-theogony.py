@@ -18,6 +18,7 @@ from python_lib import dns_management as libdns
 from python_lib import ubuntu as libubuntu
 from python_lib import ldap_management as libldap
 from python_lib import esxi as libesxi
+from python_lib import vcf as libvcf
 
 # Local Functions
 def _main_(args):
@@ -56,6 +57,10 @@ def _main_(args):
         m6()
         std.sys.exit()
 
+    if '-m8' in args:
+        m8(args)
+        std.sys.exit()
+
     if '-m7' in args:
         m7(args)
         std.sys.exit()
@@ -75,6 +80,7 @@ def help_menu():
     print("    -m5: (Module 5) Deploy LLDAP on HKS.")
     print("    -m6: (Module 6) Create Users/Groups on LLDAP.")
     print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart). Optional: MGT or VI to build one type, --replace to rebuild, --dns-ntp to re-apply DNS/NTP only.")
+    print("    -m8: (Module 8) VCF Fleet management domain: build spec, preflight, validate on the VCF Installer. --force to validate despite preflight failures.")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -140,6 +146,8 @@ def install_pip_packages():
     libos.install_package("pyvmomi")
     libos.install_package("cryptography")
     std.subprocess.check_call(["apt", "-y", "install", "xorriso"])
+    libos.install_package("dnspython")
+    std.subprocess.check_call(["apt", "-y", "install", "iputils-ping"])
     print("=========================================================")
     print("Init completed.")
     print("=========================================================")
@@ -243,6 +251,25 @@ def m7(args):
         liblog.print_logs("    "+r["fqdn"]+" ("+r["ip"]+")  SHA-256 "+r["ssl_thumbprint"])
     print("=========================================================")
     print("Module 7 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
+
+def m8(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 8 ")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        result = libvcf.run_pass1(lab_spec_py, force=("--force" in args))
+    except (libvcf.VcfError, libesxi.EsxiBuildError) as e:
+        liblog.print_logs("Module 8 stopped: "+str(e))
+        std.sys.exit(1)
+    liblog.print_logs("VCF Installer validation result: "+str(result))
+    print("=========================================================")
+    print("Module 8 runtime is completed.")
     print("=========================================================")
     print("")
     print("")

@@ -14,6 +14,16 @@
         "system" : "esxi_nested",
         "username" : "<sample: root>",
         "password" : "<sample: VMware123!>"
+    },
+    {
+        "system" : "vcf_installer",
+        "username" : "<sample: admin@local>",
+        "password" : "<sample: VMware123!VMware123!>"
+    },
+    {
+        "system" : "vcf_components",
+        "username" : "<not used: one password for every VCF component account>",
+        "password" : "<sample: VMware123!VMware123!>"
     }],
 
     "domain" : {
@@ -143,10 +153,37 @@
     },
 
     "vcf" : {
-        "components" : [{
-            "name" : "<sample: vcenter>",
-            "assign_ip_from_this_network" : 0
-        }],
+        "version" : "9.1.1.0",
+        "use_these_credentials" : 4,
+        "installer" : {
+            "ip_address" : "<sample: 10.0.2.15 (between ubuntu_servers range_end and nested_esxi_servers range_start)>",
+            "use_these_credentials" : 3
+        },
+        "networks" : {
+            "management" : 1,
+            "vm_management" : 1,
+            "vmotion" : { "network" : 3, "range_start" : "10", "range_end" : "50" },
+            "vsan" : { "network" : 3, "range_start" : "60", "range_end" : "100" },
+            "host_tep" : { "network" : 3, "range_start" : "110", "range_end" : "150" }
+        },
+        "components" : [
+            { "name" : "vcenter", "size" : "small" },
+            { "name" : "sddc_manager" },
+            { "name" : "nsx", "count" : 1, "size" : "medium" },
+            { "name" : "vcf_operations", "count" : 1, "size" : "small" },
+            { "name" : "vcf_operations_collector", "size" : "small" },
+            { "name" : "vsp", "size" : "small", "pool_size" : 12 },
+            { "name" : "vidb" },
+            { "name" : "license_server" },
+            { "name" : "fleet_lcm" },
+            { "name" : "sddc_lcm" },
+            { "name" : "vcf_automation", "size" : "small", "pool_size" : 5 }
+        ],
+        "cluster" : {
+            "vsan_type" : "<Select: OSA|ESA>",
+            "failures_to_tolerate" : 1,
+            "vmnics" : ["vmnic0", "vmnic1"]
+        },
         "naming_convention" : {
             "root" : "<sample: vcf>",
             "object" : [{

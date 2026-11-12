@@ -10,7 +10,7 @@
 #              Replaces hesiod-vcf9 module 4 (pcli_create_vm_from_iso + Set-VMKeystrokes + pcli_prep_esxi_hosts_for_VCF).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.5 (DNS + NTP set and verified through the vSphere API after first boot; configure_dns_ntp() for existing hosts)
+# Version: 1.6 (deploy_to_these_datastores: hosts spread across datastores by free space, swap included)
 #
 # Public functions
 #   create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False)  Build every host (optionally only "MGT"/"VI").
@@ -107,7 +107,11 @@ def get_nested_esxi_specs(lab_spec, types=None):
             count = int(group["deploy_this_many"])
             if len(ip_range) < count:
                 raise EsxiBuildError("lab_spec", f"'{gtype}': deploy_this_many={count} but the IP range has {len(ip_range)}")
-            ds_index = group.get("deploy_to_this_datastore", group.get("deploy_to__this_datastore", 0))
+            # Candidate datastores: "deploy_to_these_datastores" (list of indices) or the single legacy index
+            ds_indices = group.get("deploy_to_these_datastores")
+            if ds_indices is None:
+                ds_indices = [group.get("deploy_to_this_datastore", group.get("deploy_to__this_datastore", 0))]
+            ds_names = [host["deploy_vms_to_these_datastores"][i] for i in ds_indices]
             disks = [int(d["storage_GB"]) for d in group["harddisks"]]
             if disks[0] < 32:
                 raise EsxiBuildError("lab_spec", f"'{gtype}': harddisks[0] is the boot disk and must be >= 32 GB (is {disks[0]})")
@@ -133,7 +137,8 @@ def get_nested_esxi_specs(lab_spec, types=None):
                     "esxi_host": host["ip_address"],
                     "esxi_username": phys_auth["username"],
                     "esxi_password": phys_auth["password"],
-                    "datastore": host["deploy_vms_to_these_datastores"][ds_index],
+                    "datastore": ds_names[0],          # replaced by the placement step at build time
+                    "datastores": ds_names,
                     "network": host["deploy_vms_to_these_networks"][group["deploy_to_this_network"]],
                     "stock_iso": group["CD_path"],
                     "legacy_cpu": str(group.get("allow_legacy_cpu", "no")).lower() in ("yes", "true"),
@@ -289,6 +294,51 @@ def _guestinfo(spec, include_password=True):
               "vlan": spec["vlan"], "dns": ",".join(spec["dns"]), "domain": spec["domain"], "ntp": spec["ntp"],
               "mtu": spec["mtu"], "password": spec["password"] if include_password else ""}
     return [vim.option.OptionValue(key=f"guestinfo.hesiod.{k}", value=v) for k, v in values.items()]
+
+
+GIB = 1024 ** 3
+
+
+def _footprint_gb(spec):
+    """(committed, worst_case) GB on the datastore. Committed = what exists at power-on: the swap file
+    (= memory, no reservation) + the boot disk + ~1 GB of VM files. Worst case adds fully grown thin vSAN disks."""
+    committed = spec["memory_gb"] + spec["disks_gb"][0] + 1
+    return committed, committed + sum(spec["disks_gb"][1:])
+
+
+def _place(content, spec, planned):
+    """Pick the candidate datastore with the most room left after what this run has already placed there.
+    Ranking uses worst-case sizes (so hosts spread out); the fit check uses power-on sizes (so a datastore can still
+    take a second host when there are fewer datastores than hosts). `planned` = {name: [committed_gb, worst_gb]}."""
+    committed, worst = _footprint_gb(spec)
+    options = []
+    for name in spec["datastores"]:
+        ds = libubuntu._find(content, vim.Datastore, name)
+        if not ds:
+            raise EsxiBuildError("placement", f"datastore '{name}' not found on {spec['esxi_host']}")
+        try:
+            ds.RefreshDatastore()
+        except Exception:
+            pass
+        if not ds.summary.accessible:
+            liblog.print_logs(f"  datastore {name} is not accessible; skipping")
+            continue
+        free = ds.summary.freeSpace / GIB
+        p_committed, p_worst = planned.get(name, [0, 0])
+        options.append((free - p_worst, free, name, ds, free - p_committed))
+    fits = [o for o in options if o[4] >= committed]
+    if not fits:
+        best = max(options, key=lambda o: o[4], default=(0, 0, "none", None, 0))
+        raise EsxiBuildError("placement", f"{spec['name']} needs {committed:.0f} GB at power-on (swap {spec['memory_gb']} GB + "
+                                          f"boot {spec['disks_gb'][0]} GB); best candidate '{best[2]}' has {best[4]:.0f} GB left")
+    score, free, name, ds, left = max(fits, key=lambda o: (o[0], o[4]))
+    planned[name] = [planned.get(name, [0, 0])[0] + committed, planned.get(name, [0, 0])[1] + worst]
+    liblog.print_logs(f"  placing {spec['name']} on {name} ({left:.0f} GB left of {free:.0f} GB free; needs {committed:.0f} GB now, "
+                      f"up to {worst:.0f} GB if its thin disks fill)")
+    if worst > score:  # score = free space minus worst cases already placed here this run
+        liblog.print_logs(f"  WARNING: {name} could run out of space if {spec['name']}'s thin disks fill "
+                          f"({worst:.0f} GB worst case vs {score:.0f} GB available)")
+    return ds
 
 
 def _portgroup_vlan(host, name):
@@ -460,24 +510,26 @@ def create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False):
     specs = get_nested_esxi_specs(lab_spec, types)
     if not specs:
         raise EsxiBuildError("lab_spec", f"no nested_esxi_servers match types={types}")
-    isos = {}
+    isos, planned = {}, {}
 
-    # Phase 1 (sequential, a few seconds per host): ISO once, create VM, power on
+    # Phase 1 (sequential, a few seconds per host): ISO once, place, create VM, power on
     for spec in specs:
         liblog.print_logs(f"Creating {spec['name']} ({spec['fqdn']}, {spec['ip']}, VLAN {spec['vlan']}) on {spec['esxi_host']}.")
         si = libubuntu._connect(spec)
         try:
             loc = libubuntu._locate(si, spec)
             _check_portgroup(loc, spec)
-            key = (spec["esxi_host"], spec["stock_iso"], spec["legacy_cpu"])
-            if key not in isos:
-                isos[key] = _ensure_kickstart_iso(si, loc, spec)
             existing = libubuntu._find(loc["content"], vim.VirtualMachine, spec["name"])
             if existing:
                 if not replace_existing:
                     raise EsxiBuildError("precheck", f"VM {spec['name']} already exists (use replace_existing=True)")
                 liblog.print_logs(f"Deleting existing VM {spec['name']}.")
                 libubuntu._destroy_vm(existing)
+            key = (spec["esxi_host"], spec["stock_iso"], spec["legacy_cpu"])
+            if key not in isos:
+                isos[key] = _ensure_kickstart_iso(si, loc, spec)
+            loc["ds"] = _place(loc["content"], spec, planned.setdefault(spec["esxi_host"], {}))
+            spec["datastore"] = loc["ds"].name
             vm = _create_vm(loc, spec, isos[key])
             libubuntu._wait_task(vm.PowerOnVM_Task(), "power_on")
         except (EsxiBuildError, libubuntu.UbuntuBuildError):
@@ -522,6 +574,7 @@ if __name__ == "__main__":
     for s in get_nested_esxi_specs(spec_py):
         print(f"{s['type']:4} {s['name']:16} {s['fqdn']:32} {s['ip']:15} vlan={s['vlan']:5} "
               f"{s['cpu']}vCPU {s['memory_gb']}GB disks={s['disks_gb']} nics={s['nics']} "
-              f"-> {s['esxi_host']} [{s['datastore']} / {s['network']}] legacy_cpu={s['legacy_cpu']}")
+              f"-> {s['esxi_host']} [{'|'.join(s['datastores'])} / {s['network']}] legacy_cpu={s['legacy_cpu']} "
+              f"(datastore need: {_footprint_gb(s)[0]} GB at power-on, {_footprint_gb(s)[1]} GB worst case)")
     print("\n----- KS.CFG -----")
     print(render_kickstart(any(s["legacy_cpu"] for s in get_nested_esxi_specs(spec_py))))
