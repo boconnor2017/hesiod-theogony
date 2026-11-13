@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.0
+# Version: 2.1 (deploy_conjur for Module 9)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -224,6 +224,191 @@ def deploy_lldap(lab_spec):
 
     liblog.print_logs(f"LLDAP deployed. Web UI: http://{lldap_fqdn}:17170  LDAP: ldap://{lldap_fqdn}:3890  Base DN: {base_dn}")
     return lldap_ip
+
+def _conjur_pick_node(local_kube_config_path, requested_node):
+    # The Postgres data lives on a hostPath, so the pod must always land on the same node.
+    # Order: lab_spec["conjur"]["node"] > the node an earlier run pinned it to > first Ready worker.
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    v1 = std.client.CoreV1Api()
+    apps = std.client.AppsV1Api()
+    nodes = v1.list_node().items
+    names = [(n.metadata.labels or {}).get("kubernetes.io/hostname", n.metadata.name) for n in nodes]
+    if requested_node:
+        if requested_node not in names:
+            raise RuntimeError(f'lab_spec conjur.node "{requested_node}" is not a cluster node. Nodes: {names}')
+        return requested_node
+    try:
+        existing = apps.read_namespaced_deployment("conjur-postgres", "conjur")
+        pinned = (existing.spec.template.spec.node_selector or {}).get("kubernetes.io/hostname")
+        if pinned:
+            return pinned
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+    def ready(n):
+        return any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))
+    def control_plane(n):
+        labels = n.metadata.labels or {}
+        return "node-role.kubernetes.io/control-plane" in labels or "node-role.kubernetes.io/master" in labels
+    candidates = [n for n in nodes if ready(n) and not control_plane(n)] or [n for n in nodes if ready(n)]
+    if not candidates:
+        raise RuntimeError("No Ready node in the cluster to pin the Conjur database to.")
+    return (candidates[0].metadata.labels or {}).get("kubernetes.io/hostname", candidates[0].metadata.name)
+
+def _conjur_self_signed_cert(fqdn, ip_address):
+    # 10-year self-signed certificate for the nginx TLS front end (SAN: FQDN + IP)
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import datetime as _dt
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn)])
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - _dt.timedelta(days=1)).not_valid_after(now + _dt.timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(fqdn), x509.IPAddress(std.ipaddress.ip_address(ip_address))]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
+    return cert_pem, key_pem
+
+def _conjur_create_secret_once(v1, name, secret_type, string_data):
+    # Created on the first run only. Never overwritten: replacing the data key would make the vault unreadable.
+    try:
+        v1.read_namespaced_secret(name, "conjur")
+        liblog.print_logs(f"    Secret conjur/{name} already exists. Keeping it.")
+        return False
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+    body = std.client.V1Secret(metadata=std.client.V1ObjectMeta(name=name, namespace="conjur"),
+                               type=secret_type, string_data=string_data)
+    v1.create_namespaced_secret("conjur", body)
+    liblog.print_logs(f"    Secret conjur/{name} created.")
+    return True
+
+def _conjur_exec(local_kube_config_path, command, timeout_seconds=300):
+    # Runs a command in the conjur container (kubectl exec). Retries while Conjur is still migrating its database.
+    from kubernetes.stream import stream
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    v1 = std.client.CoreV1Api()
+    deadline = std.time.time() + timeout_seconds
+    last = ""
+    while std.time.time() < deadline:
+        pods = [p for p in v1.list_namespaced_pod("conjur", label_selector="app=conjur").items
+                if p.status.phase == "Running" and not p.metadata.deletion_timestamp]
+        if pods:
+            try:
+                out = stream(v1.connect_get_namespaced_pod_exec, pods[0].metadata.name, "conjur", container="conjur",
+                             command=command, stderr=True, stdin=False, stdout=True, tty=False)
+                if "API key for" in out or "already exists" in out:
+                    return out
+                last = out.strip()[-300:]
+            except Exception as e:
+                last = str(e)[:300]
+        std.time.sleep(15)
+    raise RuntimeError(f"'{' '.join(command)}' did not succeed within {timeout_seconds}s. Last output: {last}")
+
+def deploy_conjur(lab_spec):
+    liblog.print_logs("Instantiating deploy_conjur() function.")
+    # Prerequisites: MetalLB + Technitium (Module 3) and the DNS zone (Module 4).
+    import os
+    import re
+    from python_lib import conjur as libconjur
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    cfg = libconjur.conjur_settings(lab_spec)
+    libconjur.validate_admin_password(cfg["password"])
+    conjur_ip, conjur_fqdn, account = cfg["ip"], cfg["fqdn"], cfg["account"]
+
+    # Step 1: Make sure MetalLB can hand out the Conjur IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+conjur_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, conjur_ip, "conjur-ip-pool")
+
+    # Step 2: Namespace + secrets (data key, Postgres password, TLS). These never go into the yaml file.
+    liblog.print_logs("(Step 2) Create namespace and one-time secrets.")
+    create_namespace(kube_config_path, "conjur")
+    std.config.load_kube_config(config_file=kube_config_path)
+    v1 = std.client.CoreV1Api()
+    pg_password = std.secrets.token_hex(24)
+    data_key = std.base64.b64encode(std.secrets.token_bytes(32)).decode()
+    if _conjur_create_secret_once(v1, "conjur-secrets", "Opaque", {
+            "data-key": data_key,
+            "postgres-password": pg_password,
+            "database-url": f"postgres://postgres:{pg_password}@conjur-postgres.conjur.svc.cluster.local/postgres"}):
+        # The data key encrypts every secret in the vault. Keep a copy beside lab_spec (same trust level).
+        with open("conf/conjur_data_key.b64", "w") as f:
+            f.write(data_key+"\n")
+        os.chmod("conf/conjur_data_key.b64", 0o600)
+        liblog.print_logs("    Data key backup: conf/conjur_data_key.b64 (without it the vault cannot be decrypted).")
+    cert_pem, key_pem = _conjur_self_signed_cert(conjur_fqdn, conjur_ip)
+    if _conjur_create_secret_once(v1, "conjur-tls", "kubernetes.io/tls",
+                                  {"tls.crt": cert_pem.decode(), "tls.key": key_pem.decode()}):
+        with open("conf/conjur_tls.crt", "wb") as f:
+            f.write(cert_pem)
+        liblog.print_logs("    Certificate copy: conf/conjur_tls.crt")
+
+    # Step 3: Generate deploy_conjur.yaml from scripts_lib/k8_deploy_conjur_yaml.script
+    liblog.print_logs("(Step 3) Generate deploy_conjur.yaml file.")
+    node = _conjur_pick_node(kube_config_path, cfg["node"])
+    liblog.print_logs(f"    Conjur database pinned to node {node}; data in {cfg['data_path']} on that node.")
+    set_conjur_yaml_script_name = "deploy_conjur.yaml"
+    set_conjur_yaml_script_raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_conjur_yaml.script")
+    libvmw.write_script_to_script_file(set_conjur_yaml_script_raw.splitlines(), set_conjur_yaml_script_name)
+    replacements = {
+        "ID:CJR-001": conjur_ip,          # metallb.universe.tf/loadBalancerIPs
+        "ID:CJR-002": node,               # nodeSelector kubernetes.io/hostname (Postgres)
+        "ID:CJR-003": cfg["data_path"],   # hostPath for PGDATA
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), set_conjur_yaml_script_name)
+
+    # Step 4: Deploy Postgres + Conjur
+    liblog.print_logs("(Step 4) Deploy Conjur.")
+    delete_service_if_ip_mismatch(kube_config_path, "conjur", "conjur-service", conjur_ip)
+    try:
+        apply_from_yaml(kube_config_path, set_conjur_yaml_script_name, "conjur")
+    finally:
+        libvmw.delete_script_file(set_conjur_yaml_script_name)
+    pause_for_pods_until_running(kube_config_path, "conjur", 600)
+    service_ip = get_load_balancer_ip(kube_config_path, "conjur", "conjur-service")
+    liblog.print_logs(f"Conjur service external IP: {service_ip}")
+    if service_ip != conjur_ip:
+        raise RuntimeError(f"Conjur service got external IP {service_ip}, expected {conjur_ip}. "
+                           f"Check: kubectl -n conjur describe svc conjur-service")
+    libconjur.wait_until_ready(cfg["base_url"], 600)
+
+    # Step 5: Create the Conjur account (first run only) and set the admin password from lab_spec
+    liblog.print_logs(f"(Step 5) Conjur account '{account}' and admin password.")
+    out = _conjur_exec(kube_config_path, ["conjurctl", "account", "create", account])
+    match = re.search(r"API key for admin: (\S+)", out)
+    if match:
+        libconjur.set_admin_password(cfg["base_url"], account, match.group(1), cfg["password"])
+        liblog.print_logs("    Account created; admin password set from lab_spec.")
+    else:
+        liblog.print_logs("    Account already exists; checking the lab_spec password still logs in.")
+    libconjur.ConjurClient(cfg["base_url"], account, "admin", password=cfg["password"])
+    liblog.print_logs("    Admin login OK.")
+
+    # Step 6: Register Conjur in Technitium DNS
+    liblog.print_logs("(Step 6) Register "+conjur_fqdn+" in Technitium DNS.")
+    try:
+        domain_name = lab_spec["domain"]["name"]
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, conjur_fqdn, domain_name, conjur_ip)
+            liblog.print_logs("    Added A record: "+conjur_fqdn+" -> "+conjur_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, Conjur is still deployed: {e}")
+
+    liblog.print_logs(f"Conjur deployed. API: https://{conjur_fqdn}  Account: {account}  Login: admin")
+    return conjur_ip
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")

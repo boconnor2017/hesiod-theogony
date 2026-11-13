@@ -24,6 +24,10 @@
         "system" : "vcf_components",
         "username" : "<not used: one password for every VCF component account>",
         "password" : "<sample: VMware123!VMware123!>"
+    },{
+        "system" : "conjur",
+        "username" : "admin",
+        "password" : "<sample: Hesiod-Vault-91! (12+ chars, 2 upper, 2 lower, 1 digit, 1 special)>"
     }],
 
     "domain" : {
@@ -131,6 +135,15 @@
         "use_these_credentials" : 0
     },
 
+    "conjur" : {
+        "hostname" : "<sample: conjur>",
+        "ip_address" : "<sample: 10.0.1.7>",
+        "account" : "<sample: hesiod>",
+        "use_these_credentials" : 5,
+        "node" : "<optional: HKS node that holds the vault database; delete this line to use the first Ready worker>",
+        "data_path" : "/var/lib/hesiod/conjur/pgdata"
+    },
+
     "ldap" : {
         "groups" : [{
             "name" : "<sample: group_01>"
@@ -155,6 +168,7 @@
     "vcf" : {
         "version" : "9.1.1.0",
         "use_these_credentials" : 4,
+        "nameservers" : ["<sample: 10.0.1.9>"],
         "installer" : {
             "ip_address" : "<sample: 10.0.2.15 (between ubuntu_servers range_end and nested_esxi_servers range_start)>",
             "use_these_credentials" : 3

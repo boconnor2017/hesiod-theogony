@@ -1,0 +1,155 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: conjur
+---
+# nginx terminates TLS in front of Conjur (Conjur itself listens on plain HTTP :80 inside the pod)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conjur-nginx
+  namespace: conjur
+data:
+  default.conf: |
+    server {
+      listen 443 ssl;
+      ssl_certificate     /etc/nginx/tls/tls.crt;
+      ssl_certificate_key /etc/nginx/tls/tls.key;
+      location / {
+        proxy_pass http://127.0.0.1:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+      }
+    }
+---
+# PostgreSQL holds every Conjur secret (encrypted with the data key). It must survive pod restarts, so it
+# lives on a hostPath on one HKS node and the pod is pinned to that node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conjur-postgres
+  namespace: conjur
+  labels:
+    app: conjur-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: conjur-postgres
+  template:
+    metadata:
+      labels:
+        app: conjur-postgres
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ID:CJR-002
+      containers:
+      - name: postgres
+        image: postgres:15
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: conjur-secrets
+              key: postgres-password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: pgdata
+        hostPath:
+          path: ID:CJR-003
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conjur-postgres
+  namespace: conjur
+spec:
+  selector:
+    app: conjur-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conjur
+  namespace: conjur
+  labels:
+    app: conjur
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: conjur
+  template:
+    metadata:
+      labels:
+        app: conjur
+    spec:
+      containers:
+      - name: conjur
+        image: cyberark/conjur:latest
+        imagePullPolicy: IfNotPresent
+        args: ["server"]
+        ports:
+        - containerPort: 80
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: conjur-secrets
+              key: database-url
+        - name: CONJUR_DATA_KEY
+          valueFrom:
+            secretKeyRef:
+              name: conjur-secrets
+              key: data-key
+        - name: CONJUR_AUTHENTICATORS
+          value: "authn"
+        - name: CONJUR_TELEMETRY_ENABLED
+          value: "false"
+      - name: nginx
+        image: nginx:stable-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 443
+        volumeMounts:
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d
+        - name: tls
+          mountPath: /etc/nginx/tls
+          readOnly: true
+      volumes:
+      - name: nginx-conf
+        configMap:
+          name: conjur-nginx
+      - name: tls
+        secret:
+          secretName: conjur-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conjur-service
+  namespace: conjur
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: ID:CJR-001
+spec:
+  type: LoadBalancer
+  selector:
+    app: conjur
+  ports:
+  - name: https
+    port: 443
+    targetPort: 443

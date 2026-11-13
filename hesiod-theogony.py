@@ -19,6 +19,7 @@ from python_lib import ubuntu as libubuntu
 from python_lib import ldap_management as libldap
 from python_lib import esxi as libesxi
 from python_lib import vcf as libvcf
+from python_lib import conjur as libconjur
 
 # Local Functions
 def _main_(args):
@@ -65,6 +66,10 @@ def _main_(args):
         m7(args)
         std.sys.exit()
 
+    if '-m9' in args:
+        m9(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -89,6 +94,10 @@ def help_menu():
     print("         --retry   resume the newest failed deployment with the spec rebuilt from lab_spec")
     print("         --status  attach to the newest deployment and follow it")
     print("         --force   continue past local preflight failures")
+    print("    -m9: (Module 9) Deploy Conjur OSS password vault on HKS and export lab passwords into it.")
+    print("         --export       export only (Conjur already deployed)")
+    print("         --deploy-only  deploy Conjur, skip the export")
+    print("         --lab-only     export lab_spec credentials only (skip SDDC Manager)")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -285,6 +294,27 @@ def m8(args):
         std.sys.exit(1)
     print("=========================================================")
     print("Module 8 runtime is completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
+    return
+
+def m9(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 9 (5-10min)")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--export" not in args:
+            libk8.deploy_conjur(lab_spec_py)
+        if "--deploy-only" not in args:
+            libconjur.export_passwords(lab_spec_py, include_vcf=("--lab-only" not in args))
+    except (libconjur.ConjurError, libvcf.VcfError, RuntimeError) as e:
+        liblog.print_logs("Module 9 stopped: "+str(e))
+        std.sys.exit(1)
+    print("=========================================================")
+    print("Module 9 runtime is completed.")
     print("=========================================================")
     print("")
     print("")
