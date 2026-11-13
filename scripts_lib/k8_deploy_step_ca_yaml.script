@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: step-ca
+---
+# First-start initialisation for step-ca (runs before every start, does the one-time work only once):
+#   - step ca init creates the config, the JWK provisioner "admin" and an EC chain
+#   - the chain is then replaced with an RSA root + RSA intermediate (VCF components expect RSA, SHA-256)
+#   - the provisioner's certificate durations are set from lab_spec on every start (leaf validity)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: step-ca-init
+  namespace: step-ca
+data:
+  init.sh: |
+    set -e
+    export STEPPATH=/home/step
+    PW=/run/step/ca-password
+    if [ ! -f "$STEPPATH/config/ca.json" ]; then
+      echo "Initialising CA '$CA_NAME' (dns: $CA_DNS)"
+      DNS_ARGS=""
+      for d in $(echo "$CA_DNS" | tr ',' ' '); do DNS_ARGS="$DNS_ARGS --dns $d"; done
+      step ca init --name "$CA_NAME" $DNS_ARGS --address ":9000" --provisioner admin \
+        --password-file "$PW" --provisioner-password-file /run/step/provisioner-password
+      echo "Replacing the default EC chain with RSA-$CA_KEY_SIZE"
+      step certificate create "$CA_NAME Root CA" "$STEPPATH/certs/root_ca.crt" "$STEPPATH/secrets/root_ca_key" \
+        --profile root-ca --kty RSA --size "$CA_KEY_SIZE" --not-after 87600h --password-file "$PW" --force
+      step certificate create "$CA_NAME Intermediate CA" "$STEPPATH/certs/intermediate_ca.crt" "$STEPPATH/secrets/intermediate_ca_key" \
+        --profile intermediate-ca --ca "$STEPPATH/certs/root_ca.crt" --ca-key "$STEPPATH/secrets/root_ca_key" \
+        --ca-password-file "$PW" --kty RSA --size "$CA_KEY_SIZE" --not-after 43800h --password-file "$PW" --force
+      FP=$(step certificate fingerprint "$STEPPATH/certs/root_ca.crt")
+      sed -i "s/\"fingerprint\": *\"[0-9a-fA-F]*\"/\"fingerprint\": \"$FP\"/" "$STEPPATH/config/defaults.json"
+      echo "Root fingerprint: $FP"
+    fi
+    step ca provisioner update admin --ca-config "$STEPPATH/config/ca.json" \
+      --x509-max-dur "$LEAF_MAX_DUR" --x509-default-dur "$LEAF_DEFAULT_DUR"
+    chown -R 1000:1000 "$STEPPATH"
+    echo "init done"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: step-ca
+  namespace: step-ca
+  labels:
+    app: step-ca
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: step-ca
+  template:
+    metadata:
+      labels:
+        app: step-ca
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: ID:CA-002
+      initContainers:
+      - name: init
+        image: smallstep/step-ca:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "/init/init.sh"]
+        securityContext:
+          runAsUser: 0
+        env:
+        - name: CA_NAME
+          value: ID:CA-004
+        - name: CA_DNS
+          value: ID:CA-005
+        - name: CA_KEY_SIZE
+          value: ID:CA-006
+        - name: LEAF_MAX_DUR
+          value: ID:CA-007
+        - name: LEAF_DEFAULT_DUR
+          value: ID:CA-007
+        volumeMounts:
+        - name: data
+          mountPath: /home/step
+        - name: secrets
+          mountPath: /run/step
+          readOnly: true
+        - name: init
+          mountPath: /init
+      containers:
+      - name: step-ca
+        image: smallstep/step-ca:latest
+        imagePullPolicy: IfNotPresent
+        command: ["step-ca"]
+        args: ["--password-file", "/run/step/ca-password", "/home/step/config/ca.json"]
+        securityContext:
+          runAsUser: 1000
+        env:
+        - name: STEPPATH
+          value: /home/step
+        ports:
+        - containerPort: 9000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9000
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: data
+          mountPath: /home/step
+        - name: secrets
+          mountPath: /run/step
+          readOnly: true
+      volumes:
+      - name: data
+        hostPath:
+          path: ID:CA-003
+          type: DirectoryOrCreate
+      - name: secrets
+        secret:
+          secretName: step-ca-secrets
+      - name: init
+        configMap:
+          name: step-ca-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: step-ca-service
+  namespace: step-ca
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: ID:CA-001
+spec:
+  type: LoadBalancer
+  selector:
+    app: step-ca
+  ports:
+  - name: https
+    port: 443
+    targetPort: 9000

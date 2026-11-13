@@ -144,6 +144,25 @@
         "data_path" : "/var/lib/hesiod/conjur/pgdata"
     },
 
+    "certificate_authority" : {
+        "hostname" : "<sample: ca>",
+        "ip_address" : "<sample: 10.0.1.6>",
+        "name" : "<sample: Hesiod Lab CA>",
+        "key_size" : 4096,
+        "leaf_validity_days" : 365,
+        "renew_within_days" : 30,
+        "rotate_types" : ["VCENTER", "NSXT_MANAGER", "ESXI", "SDDC_MANAGER"],
+        "csr" : {
+            "country" : "<sample: US>",
+            "state" : "<sample: Virginia>",
+            "locality" : "<sample: Reston>",
+            "organization" : "<sample: Hesiod>",
+            "organizationUnit" : "<sample: MPC>"
+        },
+        "node" : "<optional: HKS node that holds the CA data; delete this line to use the first Ready worker>",
+        "data_path" : "/var/lib/hesiod/step-ca"
+    },
+
     "ldap" : {
         "groups" : [{
             "name" : "<sample: group_01>"

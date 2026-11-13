@@ -4,7 +4,7 @@
 #              same pattern as deploy_lldap / deploy_technitium.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (evidence report: -m9 --report)
+# Version: 1.2 (sddc_manager_client shared with python_lib/ca.py)
 #
 # What gets exported (-m9 and -m9 --export):
 #   vcf/<resourceType>/<resourceName>/<credentialType>/<username>   every credential SDDC Manager manages
@@ -210,11 +210,10 @@ def _sddc_manager_fqdn(lab_spec):
     return plan["sddc_manager"]["fqdns"]["sddc_manager"]["fqdn"]
 
 
-def get_sddc_manager_credentials(lab_spec):
-    """Every credential SDDC Manager manages, with the password in plaintext."""
+def sddc_manager_client(lab_spec):
+    """Logged-in SDDC Manager API client (same /v1/tokens API as the VCF Installer). Also used by python_lib/ca.py."""
     fqdn = _sddc_manager_fqdn(lab_spec)
     vcf_pw = lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]
-    sddc = None
     # administrator@vsphere.local has the ADMIN role in SDDC Manager; admin@local is the break-glass fallback
     for user in (lab_spec["vcf"].get("sddc_manager_api_user"), "administrator@vsphere.local", "admin@local"):
         if not user:
@@ -222,11 +221,15 @@ def get_sddc_manager_credentials(lab_spec):
         try:
             sddc = libvcf._Installer(f"https://{fqdn}", user, vcf_pw)
             liblog.print_logs(f"    SDDC Manager {fqdn}: logged in as {user}.")
-            break
+            return sddc
         except libvcf.VcfError as e:
             liblog.print_logs(f"    SDDC Manager {fqdn}: login as {user} failed ({str(e)[:150]}).")
-    if sddc is None:
-        raise ConjurError(f"cannot log in to SDDC Manager {fqdn} with the vcf_components password.")
+    raise ConjurError(f"cannot log in to SDDC Manager {fqdn} with the vcf_components password.")
+
+
+def get_sddc_manager_credentials(lab_spec):
+    """Every credential SDDC Manager manages, with the password in plaintext."""
+    sddc = sddc_manager_client(lab_spec)
 
     creds, page = [], 0
     while True:

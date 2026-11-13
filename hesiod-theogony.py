@@ -20,6 +20,7 @@ from python_lib import ldap_management as libldap
 from python_lib import esxi as libesxi
 from python_lib import vcf as libvcf
 from python_lib import conjur as libconjur
+from python_lib import ca as libca
 
 # Local Functions
 def _main_(args):
@@ -70,6 +71,10 @@ def _main_(args):
         m9(args)
         std.sys.exit()
 
+    if '-m10' in args:
+        m10(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -99,6 +104,12 @@ def help_menu():
     print("         --deploy-only  deploy Conjur, skip the export")
     print("         --lab-only     export lab_spec credentials only (skip SDDC Manager)")
     print("         --report       evidence report only: readiness, inventory, coverage (no secret values)")
+    print("    -m10: (Module 10) Deploy step-ca on HKS, test issuance, list VCF certificates (no VCF changes).")
+    print("         --rotate [TYPE ...]  rotate VCF certificates to the lab CA (VCENTER NSXT_MANAGER ESXI SDDC_MANAGER)")
+    print("         --dry-run            with --rotate: new CSRs + signing + SDDC Manager validation, nothing installed")
+    print("         --force              with --rotate: rotate even certificates that are current and from the lab CA")
+    print("         --test               US-004 issuance test only")
+    print("         --report             evidence report: CA, US-004 test, VCF certificates, rotation history")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -326,6 +337,42 @@ def m9(args):
     print("")
     print("")
     return
+
+def m10(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 10")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    types = [a.upper() for a in args if a.upper() in libca.ROTATION_ORDER] or None
+    try:
+        if "--report" in args:
+            report = libca.evidence_report(lab_spec_py)
+            if report["result"] != "PASS":
+                std.sys.exit(1)
+            return
+        if "--test" in args:
+            result = libca.test_issuance(lab_spec_py)
+            for c in result["checks"]:
+                liblog.print_logs(f"    {c['result']}  {c['check']}  {c['detail']}")
+            if any(c["result"] != "PASS" for c in result["checks"]):
+                std.sys.exit(1)
+            return
+        if "--rotate" in args:
+            libca.rotate(lab_spec_py, types=types, force=("--force" in args), dry_run=("--dry-run" in args))
+            return
+        libk8.deploy_step_ca(lab_spec_py)
+        liblog.print_logs("US-004 issuance test:")
+        for c in libca.test_issuance(lab_spec_py)["checks"]:
+            liblog.print_logs(f"    {c['result']}  {c['check']}  {c['detail']}")
+        libca.inventory(lab_spec_py)
+    except (libca.CaError, libconjur.ConjurError, libvcf.VcfError, RuntimeError) as e:
+        liblog.print_logs("Module 10 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 10 runtime is completed.")
+        print("=========================================================")
+        print("")
 
 def update_theo_database():
     liblog.print_logs("Updating theo database.")

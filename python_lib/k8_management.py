@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.1 (deploy_conjur for Module 9)
+# Version: 2.2 (deploy_step_ca + exec_in_pod for Module 10)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -225,7 +225,7 @@ def deploy_lldap(lab_spec):
     liblog.print_logs(f"LLDAP deployed. Web UI: http://{lldap_fqdn}:17170  LDAP: ldap://{lldap_fqdn}:3890  Base DN: {base_dn}")
     return lldap_ip
 
-def _conjur_pick_node(local_kube_config_path, requested_node):
+def _conjur_pick_node(local_kube_config_path, requested_node, namespace="conjur", deployment="conjur-postgres"):
     # The Postgres data lives on a hostPath, so the pod must always land on the same node.
     # Order: lab_spec["conjur"]["node"] > the node an earlier run pinned it to > first Ready worker.
     std.config.load_kube_config(config_file=local_kube_config_path)
@@ -238,7 +238,7 @@ def _conjur_pick_node(local_kube_config_path, requested_node):
             raise RuntimeError(f'lab_spec conjur.node "{requested_node}" is not a cluster node. Nodes: {names}')
         return requested_node
     try:
-        existing = apps.read_namespaced_deployment("conjur-postgres", "conjur")
+        existing = apps.read_namespaced_deployment(deployment, namespace)
         pinned = (existing.spec.template.spec.node_selector or {}).get("kubernetes.io/hostname")
         if pinned:
             return pinned
@@ -252,7 +252,7 @@ def _conjur_pick_node(local_kube_config_path, requested_node):
         return "node-role.kubernetes.io/control-plane" in labels or "node-role.kubernetes.io/master" in labels
     candidates = [n for n in nodes if ready(n) and not control_plane(n)] or [n for n in nodes if ready(n)]
     if not candidates:
-        raise RuntimeError("No Ready node in the cluster to pin the Conjur database to.")
+        raise RuntimeError(f"No Ready node in the cluster to pin {namespace}/{deployment} to.")
     return (candidates[0].metadata.labels or {}).get("kubernetes.io/hostname", candidates[0].metadata.name)
 
 def _conjur_self_signed_cert(fqdn, ip_address):
@@ -275,19 +275,19 @@ def _conjur_self_signed_cert(fqdn, ip_address):
     key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
     return cert_pem, key_pem
 
-def _conjur_create_secret_once(v1, name, secret_type, string_data):
+def _conjur_create_secret_once(v1, name, secret_type, string_data, namespace="conjur"):
     # Created on the first run only. Never overwritten: replacing the data key would make the vault unreadable.
     try:
-        v1.read_namespaced_secret(name, "conjur")
-        liblog.print_logs(f"    Secret conjur/{name} already exists. Keeping it.")
+        v1.read_namespaced_secret(name, namespace)
+        liblog.print_logs(f"    Secret {namespace}/{name} already exists. Keeping it.")
         return False
     except std.ApiException as e:
         if e.status != 404:
             raise
-    body = std.client.V1Secret(metadata=std.client.V1ObjectMeta(name=name, namespace="conjur"),
+    body = std.client.V1Secret(metadata=std.client.V1ObjectMeta(name=name, namespace=namespace),
                                type=secret_type, string_data=string_data)
-    v1.create_namespaced_secret("conjur", body)
-    liblog.print_logs(f"    Secret conjur/{name} created.")
+    v1.create_namespaced_secret(namespace, body)
+    liblog.print_logs(f"    Secret {namespace}/{name} created.")
     return True
 
 def _conjur_exec(local_kube_config_path, command, timeout_seconds=300):
@@ -409,6 +409,106 @@ def deploy_conjur(lab_spec):
 
     liblog.print_logs(f"Conjur deployed. API: https://{conjur_fqdn}  Account: {account}  Login: admin")
     return conjur_ip
+
+def exec_in_pod(local_kube_config_path, namespace, label_selector, container, script, timeout_seconds=120):
+    # Runs a shell script in the first Running pod matching label_selector (kubectl exec). Returns (rc, output).
+    from kubernetes.stream import stream
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    v1 = std.client.CoreV1Api()
+    pods = [p for p in v1.list_namespaced_pod(namespace, label_selector=label_selector).items
+            if p.status.phase == "Running" and not p.metadata.deletion_timestamp]
+    if not pods:
+        raise RuntimeError(f"No Running pod in {namespace} matching {label_selector}.")
+    out = stream(v1.connect_get_namespaced_pod_exec, pods[0].metadata.name, namespace, container=container,
+                 command=["/bin/sh", "-c", script + '\necho "__HESIOD_RC=$?"'], stderr=True, stdin=False,
+                 stdout=True, tty=False, _request_timeout=timeout_seconds)
+    import re
+    m = re.search(r"__HESIOD_RC=(\d+)\s*$", out)
+    return (int(m.group(1)) if m else 255), re.sub(r"__HESIOD_RC=\d+\s*$", "", out)
+
+def deploy_step_ca(lab_spec):
+    liblog.print_logs("Instantiating deploy_step_ca() function.")
+    # Prerequisites: MetalLB + Technitium (Module 3) and the DNS zone (Module 4).
+    import os
+    from python_lib import ca as libca
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    cfg = libca.ca_settings(lab_spec)
+    ca_ip, ca_fqdn = cfg["ip"], cfg["fqdn"]
+
+    # Step 1: Make sure MetalLB can hand out the CA IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+ca_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, ca_ip, "step-ca-ip-pool")
+
+    # Step 2: Namespace + one-time secrets: the password that encrypts the CA keys, and the provisioner password
+    liblog.print_logs("(Step 2) Create namespace and one-time secrets.")
+    create_namespace(kube_config_path, "step-ca")
+    std.config.load_kube_config(config_file=kube_config_path)
+    v1 = std.client.CoreV1Api()
+    if _conjur_create_secret_once(v1, "step-ca-secrets", "Opaque", {
+            "ca-password": std.secrets.token_urlsafe(32),
+            "provisioner-password": std.secrets.token_urlsafe(32)}, namespace="step-ca"):
+        liblog.print_logs("    CA key password and provisioner password generated.")
+    secret = v1.read_namespaced_secret("step-ca-secrets", "step-ca")
+    passwords = {k: std.base64.b64decode(v).decode() for k, v in secret.data.items()}
+    libca.backup_ca_passwords(lab_spec, passwords)
+
+    # Step 3: Generate deploy_step_ca.yaml from scripts_lib/k8_deploy_step_ca_yaml.script
+    liblog.print_logs("(Step 3) Generate deploy_step_ca.yaml file.")
+    node = _conjur_pick_node(kube_config_path, cfg["node"], namespace="step-ca", deployment="step-ca")
+    liblog.print_logs(f"    step-ca pinned to node {node}; CA data in {cfg['data_path']} on that node.")
+    yaml_name = "deploy_step_ca.yaml"
+    raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_step_ca_yaml.script")
+    libvmw.write_script_to_script_file(raw.splitlines(), yaml_name)
+    replacements = {
+        "ID:CA-001": ca_ip,                                   # metallb.universe.tf/loadBalancerIPs
+        "ID:CA-002": node,                                    # nodeSelector kubernetes.io/hostname
+        "ID:CA-003": cfg["data_path"],                        # hostPath for /home/step
+        "ID:CA-004": cfg["name"],                             # CA name (root/intermediate subjects)
+        "ID:CA-005": ",".join(cfg["dns_names"]),              # names/IPs on step-ca's own TLS certificate
+        "ID:CA-006": str(cfg["key_size"]),                    # RSA size of root + intermediate
+        "ID:CA-007": f"{cfg['leaf_validity_days'] * 24}h",    # leaf max + default duration
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), yaml_name)
+
+    # Step 4: Deploy step-ca
+    liblog.print_logs("(Step 4) Deploy step-ca.")
+    delete_service_if_ip_mismatch(kube_config_path, "step-ca", "step-ca-service", ca_ip)
+    try:
+        apply_from_yaml(kube_config_path, yaml_name, "step-ca")
+    finally:
+        libvmw.delete_script_file(yaml_name)
+    pause_for_pods_until_running(kube_config_path, "step-ca", 600)
+    service_ip = get_load_balancer_ip(kube_config_path, "step-ca", "step-ca-service")
+    liblog.print_logs(f"step-ca service external IP: {service_ip}")
+    if service_ip != ca_ip:
+        raise RuntimeError(f"step-ca service got external IP {service_ip}, expected {ca_ip}. "
+                           f"Check: kubectl -n step-ca describe svc step-ca-service")
+    libca.wait_until_ready(cfg["base_url"], 300)
+
+    # Step 5: Publish the CA chain (public certificates only) to conf/ca/
+    liblog.print_logs("(Step 5) Publish root and intermediate certificates.")
+    paths = libca.fetch_ca_chain(lab_spec)
+    for p in paths.values():
+        liblog.print_logs("    "+p)
+
+    # Step 6: Register the CA in Technitium DNS
+    liblog.print_logs("(Step 6) Register "+ca_fqdn+" in Technitium DNS.")
+    try:
+        domain_name = lab_spec["domain"]["name"]
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, ca_fqdn, domain_name, ca_ip)
+            liblog.print_logs("    Added A record: "+ca_fqdn+" -> "+ca_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, step-ca is still deployed: {e}")
+
+    liblog.print_logs(f"step-ca deployed. API: https://{ca_fqdn}  Root: {paths['root']}")
+    return ca_ip
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")
