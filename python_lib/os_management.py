@@ -86,6 +86,9 @@ def setup_common(conn, ssh_password, k8_version):
     liblog.print_logs("(Prereq 2) Loading kernel modules for bridging.")
     run_sudo(conn, "modprobe overlay", ssh_password)
     run_sudo(conn, "modprobe br_netfilter", ssh_password)
+    # Persist the modules: without br_netfilter after a reboot the bridge sysctls below silently don't exist,
+    # and pod -> ClusterIP -> pod traffic on the same node times out (e.g. Conjur -> conjur-postgres).
+    run_sudo(conn, "bash -c 'printf \"overlay\\nbr_netfilter\\n\" > /etc/modules-load.d/k8s.conf'", ssh_password)
     
     # Configure sysctl params
     sysctl_cmd = (
