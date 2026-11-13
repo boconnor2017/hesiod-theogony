@@ -4,7 +4,7 @@
 #              same pattern as deploy_lldap / deploy_technitium.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (evidence report: -m9 --report)
 #
 # What gets exported (-m9 and -m9 --export):
 #   vcf/<resourceType>/<resourceName>/<credentialType>/<username>   every credential SDDC Manager manages
@@ -21,14 +21,21 @@
 #   wait_until_ready(base_url, timeout_s)
 #   get_sddc_manager_credentials(lab_spec)     list of dicts from SDDC Manager
 #   export_passwords(lab_spec)                 load policy + write every secret (what -m9 runs after the deploy)
+#   evidence_report(lab_spec)                  readiness + inventory + coverage report, no secret values
+#                                              (-m9 --report; writes conf/evidence/conjur_evidence_<timestamp>.md/.json)
 
 # Import Hesiod Libraries
 from python_lib import logs_and_headers as liblog
 from python_lib import vcf as libvcf
 
 import base64
+import datetime
+import hashlib
 import json
+import os
 import re
+import socket
+import ssl
 import time
 from urllib.parse import quote
 
@@ -160,6 +167,24 @@ class ConjurClient:
         if r.status_code >= 300:
             raise ConjurError(f"policy load failed: HTTP {r.status_code} {r.text[:400]}")
         return r.json() if r.content else {}
+
+    def whoami(self):
+        r = self._call("GET", "/whoami")
+        if r.status_code >= 300:
+            raise ConjurError(f"whoami failed: HTTP {r.status_code} {r.text[:200]}")
+        return r.json()
+
+    def list_variables(self):
+        out, offset = [], 0
+        while True:
+            r = self._call("GET", f"/resources/{self.acct}?kind=variable&limit=100&offset={offset}")
+            if r.status_code >= 300:
+                raise ConjurError(f"listing variables failed: HTTP {r.status_code} {r.text[:200]}")
+            page = r.json()
+            out.extend(page)
+            if len(page) < 100:
+                return out
+            offset += 100
 
     def get_secret(self, var_id):
         r = self._call("GET", f"/secrets/{self.acct}/variable/{quote(var_id, safe='')}")
@@ -321,3 +346,159 @@ def export_passwords(lab_spec, include_vcf=True):
     liblog.print_logs(f"Password export complete: {written} written, {unchanged} already current, "
                       f"{len(items)} total in account '{cfg['account']}'.")
     return {"written": written, "unchanged": unchanged, "total": len(items), "ids": [v for v, _, _ in items]}
+
+
+# ---------------------------------------------------------------- evidence report (-m9 --report)
+
+READINESS_VAR = "evidence/vault-readiness-test"
+
+
+def _served_cert(ip, port=443):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+    with socket.create_connection((ip, port), timeout=10) as sock:
+        with ctx.wrap_socket(sock) as tls:
+            der = tls.getpeercert(binary_form=True)
+    info = {"sha256": ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())}
+    try:
+        from cryptography import x509
+        cert = x509.load_der_x509_certificate(der)
+        info["subject"] = cert.subject.rfc4514_string()
+        info["not_after"] = cert.not_valid_after_utc.strftime("%Y-%m-%d")
+        info["san"] = [str(n.value) for n in cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value]
+    except Exception:
+        pass
+    return info
+
+
+def _ann(var, name):
+    return next((a.get("value", "") for a in var.get("annotations", []) if a.get("name") == name), "")
+
+
+def evidence_report(lab_spec, include_vcf=True, out_dir="conf/evidence"):
+    """Readiness check, inventory and coverage of the vault. Never prints or stores a secret value."""
+    cfg = conjur_settings(lab_spec)
+    now = datetime.datetime.now()
+    rep = {"generated": now.strftime("%Y-%m-%d %H:%M:%S"), "conjur": {"url": cfg["base_url"], "fqdn": cfg["fqdn"],
+           "account": cfg["account"]}, "checks": []}
+
+    def check(name, ok, detail=""):
+        rep["checks"].append({"check": name, "result": "PASS" if ok else "FAIL", "detail": detail})
+        liblog.print_logs(f"    {'PASS' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
+        return ok
+
+    # 1. Readiness (US-005)
+    liblog.print_logs("(Report 1) Vault readiness.")
+    try:
+        r = _session().get(f"{cfg['base_url']}/", timeout=15)
+        m = re.search(r"version\D{0,100}?(\d+\.\d+\.\d+)", r.text, re.I | re.S)
+        rep["conjur"]["version"] = m.group(1) if m else "unknown"
+        check("Conjur answers over HTTPS", r.status_code == 200, f"HTTP {r.status_code}, version {rep['conjur']['version']}")
+    except requests.RequestException as e:
+        check("Conjur answers over HTTPS", False, str(e)[:120])
+    try:
+        rep["conjur"]["tls"] = _served_cert(cfg["ip"])
+        check("TLS certificate served", True, f"{rep['conjur']['tls'].get('subject', '?')}, expires "
+                                               f"{rep['conjur']['tls'].get('not_after', '?')}")
+    except Exception as e:
+        check("TLS certificate served", False, str(e)[:120])
+    dns_ip = next((x for x in lab_spec["domain"].get("server_ips", []) if re.fullmatch(r"[0-9.]+", x)), None)
+    try:  # ask the lab DNS (Technitium) directly, so the result doesn't depend on hesthe001's resolver
+        import dns.resolver
+        res = dns.resolver.Resolver(configure=False)
+        res.nameservers, res.lifetime = [dns_ip], 5
+        resolved = res.resolve(cfg["fqdn"], "A")[0].to_text()
+        check("DNS name resolves", resolved == cfg["ip"], f"{cfg['fqdn']} -> {resolved} (via {dns_ip})")
+    except Exception as e:
+        check("DNS name resolves", False, f"{cfg['fqdn']} via {dns_ip}: {str(e)[:100]}")
+
+    cj = ConjurClient(cfg["base_url"], cfg["account"], cfg["username"], password=cfg["password"])
+    who = cj.whoami()
+    check("Admin authentication", who.get("account") == cfg["account"],
+          f"account {who.get('account')}, user {who.get('username')}")
+    marker = f"readiness-{now.strftime('%Y%m%d-%H%M%S')}"
+    cj.load_policy("- !policy\n  id: evidence\n  body:\n  - !variable\n    id: vault-readiness-test\n"
+                   "    annotations:\n      hesiod/purpose: \"US-005 readiness test (not a real secret)\"\n")
+    cj.set_secret(READINESS_VAR, marker)
+    check("Write + read-back of a test secret", cj.get_secret(READINESS_VAR) == marker,
+          f"{READINESS_VAR} = {marker}")
+
+    # 2. Inventory (no values)
+    liblog.print_logs("(Report 2) Inventory.")
+    inventory = []
+    for v in cj.list_variables():
+        vid = v["id"].split(":", 2)[2]
+        secrets = v.get("secrets") or []
+        inventory.append({"id": vid, "username": _ann(v, "hesiod/username"), "source": _ann(v, "hesiod/source"),
+                          "resource_type": _ann(v, "hesiod/resource-type"), "resource_ip": _ann(v, "hesiod/resource-ip"),
+                          "credential_type": _ann(v, "hesiod/credential-type"), "versions": len(secrets),
+                          "latest_version": secrets[-1]["version"] if secrets else None,
+                          "created": v.get("created_at", "")})
+    inventory.sort(key=lambda x: x["id"])
+    rep["inventory"] = inventory
+    vcf_stored = [i for i in inventory if i["id"].startswith("vcf/")]
+    check("VCF variables hold a value", bool(vcf_stored) and all(i["versions"] > 0 for i in vcf_stored),
+          f"{sum(i['versions'] > 0 for i in vcf_stored)}/{len(vcf_stored)} vcf/ variables have a stored version")
+
+    # 3. Coverage (US-008): what SDDC Manager manages now vs what the vault holds. Compared in memory only.
+    liblog.print_logs("(Report 3) Coverage against the source systems.")
+    sddc = get_sddc_manager_credentials(lab_spec) if include_vcf else []
+    expected = build_secret_list(lab_spec, sddc)
+    coverage = []
+    for vid, value, ann in expected:
+        stored = cj.get_secret(vid)
+        coverage.append({"id": vid, "source": ann.get("hesiod/source"), "username": ann.get("hesiod/username", ""),
+                         "stored": stored is not None, "matches_source": stored == value})
+    rep["coverage"] = coverage
+    vcf_cov = [c for c in coverage if c["id"].startswith("vcf/")]
+    if include_vcf:
+        check("Every SDDC Manager credential is in the vault", all(c["stored"] for c in vcf_cov),
+              f"{sum(c['stored'] for c in vcf_cov)}/{len(vcf_cov)} stored")
+        check("Vault matches SDDC Manager's current passwords", all(c["matches_source"] for c in vcf_cov),
+              f"{sum(c['matches_source'] for c in vcf_cov)}/{len(vcf_cov)} in sync"
+              + ("" if all(c["matches_source"] for c in vcf_cov) else "; run -m9 --export"))
+    lab_cov = [c for c in coverage if c["id"].startswith("lab/")]
+    check("lab_spec credentials are in the vault", all(c["matches_source"] for c in lab_cov),
+          f"{sum(c['matches_source'] for c in lab_cov)}/{len(lab_cov)} in sync")
+
+    rep["result"] = "PASS" if all(c["result"] == "PASS" for c in rep["checks"]) else "FAIL"
+    os.makedirs(out_dir, exist_ok=True)
+    base = os.path.join(out_dir, f"conjur_evidence_{now.strftime('%Y%m%d-%H%M%S')}")
+    with open(base + ".json", "w") as f:
+        json.dump(rep, f, indent=2)
+    with open(base + ".md", "w") as f:
+        f.write(_report_markdown(rep))
+    liblog.print_logs(f"Evidence report: {rep['result']}  ->  {base}.md  (+ .json)")
+    return rep
+
+
+def _report_markdown(rep):
+    c = rep["conjur"]
+    tls = c.get("tls", {})
+    L = [f"# Password vault evidence: Conjur OSS", "",
+         f"Generated {rep['generated']} by Theogony -m9 --report. **Overall: {rep['result']}**. "
+         "No secret values appear in this report; coverage compares values in memory only.", "",
+         "| | |", "|---|---|",
+         f"| Endpoint | {c['url']} ({c['fqdn']}) |", f"| Account | {c['account']} |",
+         f"| Conjur version | {c.get('version', 'unknown')} |",
+         f"| TLS certificate | {tls.get('subject', '?')}, SAN {', '.join(tls.get('san', [])) or '?'}, "
+         f"expires {tls.get('not_after', '?')} |",
+         f"| TLS SHA-256 | `{tls.get('sha256', '?')}` |", "",
+         "## Checks", "", "| Result | Check | Detail |", "|---|---|---|"]
+    L += [f"| {x['result']} | {x['check']} | {x['detail']} |" for x in rep["checks"]]
+    L += ["", "## US-005: vault ready to accept secrets", "",
+          "Readiness rows above: HTTPS endpoint answering, TLS certificate, DNS, admin authentication, and a test "
+          f"secret (`{READINESS_VAR}`, a timestamp, not a real credential) written and read back.", "",
+          "## US-008: VCF credentials stored", "",
+          "| Variable | Username | Type | Stored | Matches SDDC Manager |", "|---|---|---|---|---|"]
+    inv = {i["id"]: i for i in rep["inventory"]}
+    for x in rep["coverage"]:
+        if x["id"].startswith("vcf/"):
+            i = inv.get(x["id"], {})
+            L.append(f"| `{x['id']}` | {x['username'] or '-'} | {i.get('credential_type') or '-'} | "
+                     f"{'yes (v' + str(i.get('latest_version')) + ')' if x['stored'] else 'NO'} | "
+                     f"{'yes' if x['matches_source'] else 'NO'} |")
+    L += ["", "## Full inventory", "", "| Variable | Username | Source | Versions | Created |", "|---|---|---|---|---|"]
+    L += [f"| `{i['id']}` | {i['username'] or '-'} | {i['source'] or '-'} | {i['versions']} | {i['created'][:19]} |"
+          for i in rep["inventory"]]
+    return "\n".join(L) + "\n"

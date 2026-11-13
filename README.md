@@ -298,3 +298,29 @@ Check on status. Note: its normal for this process to take several hours.
 ```
 sudo python3 hesiod-theogony.py -m8 --status
 ``` 
+
+## Module 9: Deploy a CyberArk Conjur OSS Server on HKS
+This script uses the configuration from `lab_spec.json` in Module 1 to build a `conjur-oss` kubernetes pod on HKS from Module 2. This script will automatically query the SDDC Manager from Module 8, will pull passwords, and will store them in the password vault. 
+
+```
+"conjur" : {
+    "hostname" : "<sample: conjur>",
+    "ip_address" : "<sample: 10.0.1.7>",
+    "account" : "<sample: hesiod>",
+    "use_these_credentials" : 5,
+    "node" : "<optional: HKS node that holds the vault database; delete this line to use the first Ready worker>",
+    "data_path" : "/var/lib/hesiod/conjur/pgdata"
+    }
+```
+
+Use additional parameters `--report` to generate a markdown file containing readiness of the password vault and available passwords.
+
+Deploy Conjur, query SDDC Manager, store passwords in vault.
+```
+sudo python3 hesiod-theogony.py -m9
+``` 
+
+Generate a markdown file showing readiness of the password vault and secrets.
+```
+sudo python3 hesiod-theogony.py -m9 --report
+``` 

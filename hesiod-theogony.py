@@ -6,63 +6,6 @@
 # Menu:
 #  -help or blank: return menu
 
-# Bootstrap: install third-party packages BEFORE importing Hesiod libraries.
-# The python_lib modules import these packages at load time, so this block
-# must only use the Python standard library.
-import sys
-import shutil
-import subprocess
-import importlib
-import importlib.util
-
-# Python module name -> Ubuntu apt package that provides it
-REQUIRED_PY_PACKAGES = {
-    "requests": "python3-requests",
-    "urllib3": "python3-urllib3",
-    "yaml": "python3-yaml",
-    "docker": "python3-docker",
-    "paramiko": "python3-paramiko",
-    "fabric": "python3-fabric",
-    "invoke": "python3-invoke",
-    "kubernetes": "python3-kubernetes",
-    "pyVmomi": "python3-pyvmomi",
-    "cryptography": "python3-cryptography",
-    "dns": "python3-dnspython",
-}
-# Command-line tool -> Ubuntu apt package that provides it
-REQUIRED_APT_TOOLS = {
-    "xorriso": "xorriso",
-    "ping": "iputils-ping",
-}
-
-def bootstrap_packages(force=False):
-    if force:
-        to_install = list(REQUIRED_PY_PACKAGES.values()) + list(REQUIRED_APT_TOOLS.values())
-    else:
-        to_install = [pkg for mod, pkg in REQUIRED_PY_PACKAGES.items() if importlib.util.find_spec(mod) is None]
-        to_install += [pkg for tool, pkg in REQUIRED_APT_TOOLS.items() if shutil.which(tool) is None]
-    if not to_install:
-        return
-    print("=========================================================")
-    print("Initializing required packages:")
-    for pkg in to_install:
-        print("  - "+pkg)
-    print("=========================================================")
-    try:
-        subprocess.check_call(["apt-get", "update"])
-        subprocess.check_call(["apt-get", "-y", "install"] + to_install)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print("ERROR: package installation failed ("+str(e)+").")
-        print("Re-run hesiod-theogony.py as root (sudo) on an Ubuntu host.")
-        sys.exit(1)
-    importlib.invalidate_caches()
-    print("=========================================================")
-    print("Init completed.")
-    print("=========================================================")
-    print("")
-
-bootstrap_packages(force='-init' in sys.argv)
-
 # Import Hesiod Libraries
 from python_lib import standard_imports as std
 from python_lib import logs_and_headers as liblog
@@ -84,7 +27,7 @@ def _main_(args):
     update_theo_database()
 
     if '-init' in args:
-        # Packages are installed by bootstrap_packages() before imports.
+        install_pip_packages()
         std.sys.exit()
 
     if '--help' in args:
@@ -155,6 +98,7 @@ def help_menu():
     print("         --export       export only (Conjur already deployed)")
     print("         --deploy-only  deploy Conjur, skip the export")
     print("         --lab-only     export lab_spec credentials only (skip SDDC Manager)")
+    print("         --report       evidence report only: readiness, inventory, coverage (no secret values)")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -187,6 +131,47 @@ def import_lab_configuration_parameters():
         print("")
         print("* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *")
         print("")
+
+def install_pip_packages():
+    print("=========================================================")
+    print("First time run. Initializing required python packages.")
+    print("=========================================================")
+    libfile.append_text_to_file(" \n"+"import requests", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import urllib3", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import urllib", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import time", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import os", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from datetime import datetime", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import yaml", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import base64", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import secrets", "python_lib/standard_imports.py")
+    libos.install_package("docker")
+    libfile.append_text_to_file(" \n"+"import docker", "python_lib/standard_imports.py")
+    libos.install_package("paramiko")
+    libfile.append_text_to_file(" \n"+"import paramiko", "python_lib/standard_imports.py")
+    libos.install_package("fabric")
+    libfile.append_text_to_file(" \n"+"from fabric import Connection, Group", "python_lib/standard_imports.py")
+    libos.install_package("invoke")
+    libfile.append_text_to_file(" \n"+"from invoke import Responder", "python_lib/standard_imports.py")
+    libos.install_package("kubernetes")
+    libfile.append_text_to_file(" \n"+"import kubernetes", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes import client, config, utils, watch, dynamic", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes.client.rest import ApiException", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"from kubernetes.dynamic.exceptions import ResourceNotFoundError", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n"+"import tempfile", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
+    libfile.append_text_to_file(" \n", "python_lib/standard_imports.py")
+    libos.install_package("pyvmomi")
+    libos.install_package("cryptography")
+    std.subprocess.check_call(["apt", "-y", "install", "xorriso"])
+    libos.install_package("dnspython")
+    std.subprocess.check_call(["apt", "-y", "install", "iputils-ping"])
+    print("=========================================================")
+    print("Init completed.")
+    print("=========================================================")
+    print("")
+    print("")
+    print("")
 
 def m1():
     print("=========================================================")
@@ -322,6 +307,11 @@ def m9(args):
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
     try:
+        if "--report" in args:
+            report = libconjur.evidence_report(lab_spec_py, include_vcf=("--lab-only" not in args))
+            if report["result"] != "PASS":
+                std.sys.exit(1)
+            return
         if "--export" not in args:
             libk8.deploy_conjur(lab_spec_py)
         if "--deploy-only" not in args:
@@ -349,6 +339,7 @@ def update_theo_database():
         return
     else:
        libfile.copy_file_from_srcdir_to_destdir("json_lib/theogony_db.json", "conf/theogony_db.json")
+       install_pip_packages()
 
 
 # Program Launch
