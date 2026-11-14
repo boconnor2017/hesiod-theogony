@@ -3,7 +3,7 @@
 #              management vCenter as a Standard Key Provider, then used for vSAN data-at-rest encryption.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (ECDSA P-256 server certificate; client-auth check needs a TLS-level refusal)
+# Version: 1.3 (vCenter trusts the KMS's own certificate, fetched and checked against the lab root)
 #
 # Why PyKMIP: vSAN encryption needs a KMIP server. OpenBao's KMIP support is a client (seal) only, and the KMIP
 # secrets engine is a Vault Enterprise feature. PyKMIP is the open-source KMIP reference server: fine for a lab,
@@ -343,6 +343,23 @@ def _vsan_config_system(si, host):
     return vim.cluster.VsanVcClusterConfigSystem("vsan-cluster-config-system", stub)
 
 
+def _trust_kms_certificate(cm, pid, cfg):
+    info = vim.encryption.KmipServerInfo(name=cfg["server_name"], address=cfg["fqdn"], port=5696)
+    root, inter = libca._ca_chain()
+    try:
+        got = cm.RetrieveKmipServerCert(keyProvider=pid, server=info)
+        leaf = x509.load_pem_x509_certificate(got.certificate.encode())
+    except Exception as e:
+        raise KmsError(f"vCenter could not fetch the KMS certificate from {cfg['fqdn']}:5696: {str(e)[:300]}")
+    if not (libca._issued_by(leaf, inter) and libca._issued_by(inter, root)):
+        raise KmsError(f"the certificate {cfg['fqdn']}:5696 presented to vCenter does not chain to the lab root "
+                       f"({leaf.subject.rfc4514_string()}, issuer {leaf.issuer.rfc4514_string()}); not trusting it.")
+    cm.UploadKmipServerCert(cluster=pid, certificate=got.certificate)
+    i = libca.cert_info(leaf)
+    liblog.print_logs(f"    vCenter now trusts the KMS certificate {i['subject']} (lab CA, expires {i['not_after']}, "
+                      f"SHA-256 {i['sha256'][:23]}...).")
+
+
 def provider_status(si, provider):
     cm = si.content.cryptoManager
     clusters = [c for c in cm.ListKmipServers() if c.clusterId.id == provider]
@@ -381,13 +398,16 @@ def configure(lab_spec):
         else:
             liblog.print_logs("    Already registered.")
 
-        liblog.print_logs("(Configure 2) Trust: vCenter trusts the lab root; the KMS trusts vCenter's lab-CA client certificate.")
-        root_pem = open(f"{libca.CA_DIR}/root_ca.crt").read()
-        cm.UploadKmipServerCert(cluster=pid, certificate=root_pem)
+        liblog.print_logs("(Configure 2) Trust both ways (lab CA certificates).")
+        # KMS trusts vCenter: vCenter presents its lab-CA client certificate (PyKMIP checks it against the lab chain)
         crt, key, new = vcenter_client_cert(lab_spec)
         cm.UploadClientCert(cluster=pid, certificate=crt, privateKey=key)
         liblog.print_logs(f"    Client certificate {'issued and ' if new else ''}uploaded "
                           f"(expires {libca.cert_info(x509.load_pem_x509_certificate(crt.encode()))['not_after']}).")
+        # vCenter trusts the KMS: vCenter's "Make vCenter trust KMS" flow pins the KMS's own certificate (a CA
+        # certificate alone leaves "vCenter trusts KMS: False"). Fetch what the KMS presents, check it chains to the lab
+        # root here, then upload exactly that.
+        _trust_kms_certificate(cm, pid, cfg)
         if cfg["set_default"]:
             cm.MarkDefault(clusterId=pid)
             liblog.print_logs("    Marked as the default key provider.")
@@ -403,8 +423,9 @@ def configure(lab_spec):
             liblog.print_logs(f"    {s['name']}: {s['status']}, {s['connection']}, vCenter trusts KMS: {s['client_trusts_server']}, "
                               f"KMS trusts vCenter: {s['server_trusts_client']}")
         if not st or st["overall"] != "green":
-            raise KmsError(f"key provider {cfg['provider']} is {st and st['overall']}, not green. "
-                           "Check: kubectl -n kmip exec deploy/kmip -- tail -50 /data/log/server.log")
+            raise KmsError(f"key provider {cfg['provider']} is {st and st['overall']}, not green. KMS log without the "
+                           "readiness-probe noise: kubectl -n kmip exec deploy/kmip -- sh -c \"grep -v -e UNEXPECTED_EOF "
+                           "-e 'Failure running TLS' -e Traceback -e 'File ' -e handshake /data/log/server.log | tail -40\"")
 
         liblog.print_logs("(Configure 4) Generate a test key through vCenter.")
         res = cm.GenerateKey(keyProvider=pid)
