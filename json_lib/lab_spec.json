@@ -189,6 +189,19 @@
         "data_path" : "/var/lib/hesiod/sftp"
     },
 
+    "key_management" : {
+        "hostname" : "<sample: kmip>",
+        "ip_address" : "<sample: 10.0.1.3>",
+        "provider_name" : "<sample: kms-mpc>",
+        "server_name" : "kmip01",
+        "set_default" : true,
+        "cluster" : "<optional: vSAN cluster name; delete this line to use the management cluster from vcf.naming_convention>",
+        "allow_reduced_redundancy" : false,
+        "dit_rekey_minutes" : 1440,
+        "node" : "<optional: HKS node that holds the key database; delete this line to use the first Ready worker>",
+        "data_path" : "/var/lib/hesiod/kmip"
+    },
+
     "ldap" : {
         "groups" : [{
             "name" : "<sample: group_01>"

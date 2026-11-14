@@ -22,6 +22,7 @@ from python_lib import vcf as libvcf
 from python_lib import conjur as libconjur
 from python_lib import ca as libca
 from python_lib import backup as libbackup
+from python_lib import kms as libkms
 
 # Local Functions
 def _main_(args):
@@ -80,6 +81,10 @@ def _main_(args):
         m11(args)
         std.sys.exit()
 
+    if '-m12' in args:
+        m12(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -120,6 +125,12 @@ def help_menu():
     print("         --dry-run            with --configure: VCF validations only, nothing saved")
     print("         --backup-now         manual backup of SDDC Manager, NSX and vCenter, each waited on")
     print("         --report             evidence report: target test, configuration, backups on the target")
+    print("    -m12: (Module 12) Deploy the KMIP key server on HKS (PyKMIP, lab CA certificates) and test it. No VCF changes.")
+    print("         --configure          register it in the management vCenter as a Standard Key Provider, trust both ways")
+    print("         --encrypt-vsan       vSAN data-at-rest + data-in-transit encryption (OSA: rolling reformat, ~1h/host)")
+    print("         --in-transit-only    vSAN data-in-transit encryption only (no reformat)")
+    print("         --backup-keys        copy the key database to conf/kmip/ and the SFTP backup target")
+    print("         --report             evidence report: KMS tests, key provider status, vSAN encryption, key backup")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -413,6 +424,40 @@ def m11(args):
     finally:
         print("=========================================================")
         print("Module 11 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m12(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 12")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--report" in args:
+            report = libkms.evidence_report(lab_spec_py)
+            if report["result"] != "PASS":
+                std.sys.exit(1)
+            return
+        if "--configure" in args:
+            libkms.configure(lab_spec_py)
+            return
+        if "--encrypt-vsan" in args or "--in-transit-only" in args:
+            libkms.encrypt_vsan(lab_spec_py, in_transit_only=("--in-transit-only" in args))
+            return
+        if "--backup-keys" in args:
+            libkms.backup_key_db(lab_spec_py)
+            return
+        libk8.deploy_kmip(lab_spec_py)
+        liblog.print_logs("KMIP server test:")
+        result = libkms.test_kms(lab_spec_py)
+        if any(c["result"] != "PASS" for c in result["checks"]):
+            std.sys.exit(1)
+    except (libkms.KmsError, libca.CaError, libconjur.ConjurError, libvcf.VcfError, RuntimeError) as e:
+        liblog.print_logs("Module 12 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 12 runtime is completed.")
         print("=========================================================")
         print("")
 

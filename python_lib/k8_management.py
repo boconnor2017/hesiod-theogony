@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.3 (deploy_sftp for Module 11)
+# Version: 2.4 (deploy_kmip for Module 12)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -617,6 +617,86 @@ def deploy_sftp(lab_spec):
     liblog.print_logs(f"SFTP deployed: sftp://{user}@{sftp_fqdn}:22{cfg['directory']}  "
                       f"host key {libbackup.host_fingerprint()}")
     return sftp_ip
+
+def deploy_kmip(lab_spec):
+    liblog.print_logs("Instantiating deploy_kmip() function.")
+    # Prerequisites: MetalLB + Technitium (Module 3), the DNS zone (Module 4) and the lab CA (Module 10).
+    from python_lib import kms as libkms
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    cfg = libkms.kms_settings(lab_spec)
+    kmip_ip, kmip_fqdn = cfg["ip"], cfg["fqdn"]
+
+    # Step 1: Make sure MetalLB can hand out the KMIP IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+kmip_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, kmip_ip, "kmip-ip-pool")
+
+    # Step 2: Namespace + TLS from the lab CA. Re-issued when missing or within 30 days of expiry.
+    liblog.print_logs("(Step 2) Create namespace and the KMIP server certificate (lab CA).")
+    create_namespace(kube_config_path, "kmip")
+    std.config.load_kube_config(config_file=kube_config_path)
+    v1 = std.client.CoreV1Api()
+    current = None
+    try:
+        current = {k: std.base64.b64decode(v).decode() for k, v in v1.read_namespaced_secret("kmip-tls", "kmip").data.items()}
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+    tls = libkms.server_tls(lab_spec, current)
+    tls_changed = _upsert_secret(v1, "kmip", "kmip-tls", tls)
+
+    # Step 3: Generate deploy_kmip.yaml from scripts_lib/k8_deploy_kmip_yaml.script
+    liblog.print_logs("(Step 3) Generate deploy_kmip.yaml file.")
+    node = _conjur_pick_node(kube_config_path, cfg["node"], namespace="kmip", deployment="kmip")
+    liblog.print_logs(f"    KMIP server pinned to node {node}; key database in {cfg['data_path']}/db on that node.")
+    yaml_name = "deploy_kmip.yaml"
+    raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_kmip_yaml.script")
+    libvmw.write_script_to_script_file(raw.splitlines(), yaml_name)
+    replacements = {
+        "ID:KMS-001": kmip_ip,           # metallb.universe.tf/loadBalancerIPs
+        "ID:KMS-002": node,              # nodeSelector kubernetes.io/hostname
+        "ID:KMS-003": cfg["data_path"],  # hostPath: key database, PyKMIP install, log
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), yaml_name)
+
+    # Step 4: Deploy (first start installs PyKMIP from PyPI, so allow a few minutes)
+    liblog.print_logs("(Step 4) Deploy the KMIP server.")
+    delete_service_if_ip_mismatch(kube_config_path, "kmip", "kmip-service", kmip_ip)
+    try:
+        apply_from_yaml(kube_config_path, yaml_name, "kmip")
+    finally:
+        libvmw.delete_script_file(yaml_name)
+    if tls_changed and current is not None:
+        apps = std.client.AppsV1Api()
+        apps.patch_namespaced_deployment("kmip", "kmip", {"spec": {"template": {"metadata": {
+            "annotations": {"hesiod/restarted-at": std.datetime.now().strftime("%Y%m%d%H%M%S")}}}}})
+        liblog.print_logs("    New server certificate: KMIP pod restarted to pick it up.")
+    std.time.sleep(5)
+    pause_for_pods_until_running(kube_config_path, "kmip", 600)
+    service_ip = get_load_balancer_ip(kube_config_path, "kmip", "kmip-service")
+    liblog.print_logs(f"KMIP service external IP: {service_ip}")
+    if service_ip != kmip_ip:
+        raise RuntimeError(f"KMIP service got external IP {service_ip}, expected {kmip_ip}. "
+                           f"Check: kubectl -n kmip describe svc kmip-service")
+    libkms.wait_until_ready(kmip_ip, 600)
+
+    # Step 5: Register in Technitium DNS
+    liblog.print_logs("(Step 5) Register "+kmip_fqdn+" in Technitium DNS.")
+    try:
+        domain_name = lab_spec["domain"]["name"]
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, kmip_fqdn, domain_name, kmip_ip)
+            liblog.print_logs("    Added A record: "+kmip_fqdn+" -> "+kmip_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, the KMIP server is still deployed: {e}")
+
+    liblog.print_logs(f"KMIP server deployed: {kmip_fqdn}:5696 (mutual TLS, lab CA)")
+    return kmip_ip
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")
