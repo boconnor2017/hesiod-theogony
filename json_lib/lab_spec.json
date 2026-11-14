@@ -156,8 +156,8 @@
             "country" : "<sample: US>",
             "state" : "<sample: Virginia>",
             "locality" : "<sample: Reston>",
-            "organization" : "<sample: Hesiod>",
-            "organizationUnit" : "<sample: MPC>"
+            "organization" : "<sample: IT>",
+            "organizationUnit" : "<sample: VCF>"
         },
         "node" : "<optional: HKS node that holds the CA data; delete this line to use the first Ready worker>",
         "data_path" : "/var/lib/hesiod/step-ca"

@@ -4,7 +4,7 @@
 #              Deployment of step-ca itself lives in python_lib/k8_management.py (deploy_step_ca).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.3 (served-chain check: endpoints that send only their own certificate, e.g. ESXi)
 #
 # Chain: <name> Root CA (RSA, 10y) -> <name> Intermediate CA (RSA, 5y) -> leaf (RSA 2048 from the VCF CSR, SHA-256)
 # Signing: CSRs are signed inside the step-ca pod with `step ca sign` (JWK provisioner "admin"), via kubectl exec.
@@ -264,19 +264,36 @@ def test_issuance(lab_spec):
     return {"leaf": info, "checks": [{"check": c, "result": "PASS" if ok else "FAIL", "detail": d} for c, ok, d in checks]}
 
 
-def served_chain_check(host, port=443):
-    """The `openssl s_client -verify` check: TLS handshake trusting only the lab root, hostname checked."""
-    root_path = f"{CA_DIR}/root_ca.crt"
-    ctx = ssl.create_default_context(cafile=root_path)
+def _handshake(host, port, cafile):
+    ctx = ssl.create_default_context(cafile=cafile)
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT    # VCF-generated certs don't always carry strict-mode extensions
+    with socket.create_connection((host, port), timeout=10) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as tls:
+            return x509.load_der_x509_certificate(tls.getpeercert(binary_form=True))
+
+
+def served_chain_check(host, port=443):
+    """The `openssl s_client -verify` check, hostname checked.
+    1st: trust only the lab root, so the endpoint must send leaf + intermediate (full_chain=True).
+    2nd (only if the issuer was missing): trust root + intermediate. ESXi serves just its own certificate; vCenter and
+    SDDC Manager hold the intermediate in their trust stores, so it still chains to the lab root (full_chain=False)."""
     try:
-        with socket.create_connection((host, port), timeout=10) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as tls:
-                leaf = x509.load_der_x509_certificate(tls.getpeercert(binary_form=True))
-        return {"verified": True, "detail": "chain verifies to the lab root", **cert_info(leaf)}
+        leaf = _handshake(host, port, f"{CA_DIR}/root_ca.crt")
+        return {"verified": True, "full_chain": True, "detail": "endpoint sends the full chain; verifies to the lab root",
+                **cert_info(leaf)}
     except ssl.SSLCertVerificationError as e:
         detail = e.verify_message or str(e)
+        if "local issuer" in detail:
+            try:
+                leaf = _handshake(host, port, f"{CA_DIR}/ca_chain.pem")
+                return {"verified": True, "full_chain": False,
+                        "detail": "endpoint sends only its own certificate; verifies to the lab root via the intermediate",
+                        **cert_info(leaf)}
+            except ssl.SSLCertVerificationError as e2:
+                detail = e2.verify_message or str(e2)
+            except (OSError, ssl.SSLError) as e2:
+                detail = str(e2)[:160]
     except (OSError, ssl.SSLError) as e:
         detail = str(e)[:160]
     out = {"verified": False, "detail": detail}
@@ -357,13 +374,13 @@ def inventory(lab_spec, sddc=None, check_served=True):
                "from_lab_ca": lab_issuer in (c.get("issuedBy") or "")}
         if check_served and fqdn:
             s = served_chain_check(fqdn)
-            row.update({"served_verified": s["verified"], "served_detail": s["detail"],
+            row.update({"served_verified": s["verified"], "served_detail": s["detail"], "full_chain": s.get("full_chain"),
                         "served_issuer": s.get("issuer", ""), "served_not_after": s.get("not_after", "")})
         rows.append(row)
     rows.sort(key=lambda r: (ROTATION_ORDER.index(r["type"]) if r["type"] in ROTATION_ORDER else 99, r["fqdn"] or ""))
     liblog.print_logs(f"VCF certificates in domain {dom.get('name')} ({len(rows)}):")
     for r in rows:
-        served = "" if "served_verified" not in r else ("  served: OK" if r["served_verified"] else f"  served: NOT lab CA ({r['served_detail'][:60]})")
+        served = "" if "served_verified" not in r else (("  served: OK" if r.get("full_chain") else "  served: OK (leaf only)") if r["served_verified"] else f"  served: NOT lab CA ({r['served_detail'][:60]})")
         liblog.print_logs(f"    {r['type']:<13} {r['fqdn']:<34} {r['days_left']!s:>5}d  issuer: {r['issued_by'][:50]}{served}")
     return {"domain": dom.get("name"), "domain_id": dom.get("id"), "certificates": rows}
 
@@ -385,13 +402,28 @@ def _trust_lab_ca(sddc):
 
 
 def _wait_validation(sddc, domain_id, validation, timeout_s=1800):
+    # 9.1.1 response: {validationId, completed: bool, validations: [{resourceFqdn, validationStatus:
+    # INPROGRESS|SUCCESSFUL|FAILED, validationMessage}]}. Stop polling as soon as completed is true:
+    # SDDC Manager drops finished validations, so polling past that point returns 404.
     vid = validation.get("validationId") or validation.get("id")
     deadline = time.time() + timeout_s
     result = validation
-    while vid and str(result.get("executionStatus", "")).upper() in ("", "IN_PROGRESS", "PENDING") \
-            and time.time() < deadline:
+
+    def done(r):
+        if r.get("completed") is True:
+            return True
+        states = [str(v.get("validationStatus", "")).upper() for v in r.get("validations") or []]
+        return bool(states) and not any(st in ("INPROGRESS", "IN_PROGRESS", "PENDING", "") for st in states)
+
+    while vid and not done(result):
+        if time.time() > deadline:
+            raise CaError(f"certificate validation {vid} still running after {timeout_s}s")
         time.sleep(10)
-        result = sddc.get(f"/v1/domains/{domain_id}/resource-certificates/validations/{vid}")
+        try:
+            result = sddc.get(f"/v1/domains/{domain_id}/resource-certificates/validations/{vid}")
+        except Exception as e:
+            raise CaError(f"lost track of certificate validation {vid} before it completed ({str(e)[:150]}). "
+                          f"Last state: {json.dumps(result)[:300]}")
     failures = []
     def walk(o):
         if isinstance(o, dict):
@@ -405,6 +437,9 @@ def _wait_validation(sddc, domain_id, validation, timeout_s=1800):
             for v in o:
                 walk(v)
     walk(result)
+    for v in result.get("validations") or []:
+        if str(v.get("validationStatus", "")).upper() not in ("SUCCESSFUL", "SUCCEEDED", "FAILED"):
+            failures.append(f"{v.get('resourceFqdn')}: status {v.get('validationStatus')} {v.get('validationMessage') or ''}")
     return result, failures
 
 
@@ -446,10 +481,7 @@ def rotate(lab_spec, types=None, force=False, dry_run=False):
     liblog.print_logs(f"    To rotate ({len(targets)}): " + ", ".join(f"{r['fqdn']} ({r['type']})" for r in targets))
 
     liblog.print_logs("(Rotate 2) Trust the lab CA in SDDC Manager.")
-    if not dry_run:
-        _trust_lab_ca(sddc)
-    else:
-        liblog.print_logs("    (dry run: trust store not changed)")
+    _trust_lab_ca(sddc)   # additive, and SDDC Manager's validation needs it, so the dry run does it too
 
     liblog.print_logs("(Rotate 3) Generate new keys and CSRs in VCF (RSA 2048).")
     spec = {"csrGenerationSpec": {**cfg["csr"], "keySize": "2048", "keyAlgorithm": "RSA"},
@@ -469,8 +501,9 @@ def rotate(lab_spec, types=None, force=False, dry_run=False):
         leaf_cert = x509.load_pem_x509_certificate(leaf.encode())
         if not _issued_by(leaf_cert, inter):
             raise CaError(f"{r['fqdn']}: signed certificate does not verify against the intermediate")
-        signed[r["fqdn"]] = {"resourceFqdn": r["fqdn"], "resourceCertificate": leaf, "caCertificate": root_pem,
-                             "certificateChain": "\n".join([leaf, inter_pem, root_pem])}
+        # SDDC Manager takes EITHER certificateChain OR resourceCertificate + caCertificate, never all three.
+        # The full chain (leaf, intermediate, root) carries the intermediate, so that is the form used.
+        signed[r["fqdn"]] = {"resourceFqdn": r["fqdn"], "certificateChain": "\n".join([leaf, inter_pem, root_pem])}
         info = cert_info(leaf_cert)
         liblog.print_logs(f"    {r['fqdn']}: serial {info['serial']}, {info['key']}, {info['signature']}, "
                           f"until {info['not_after']}")
@@ -496,7 +529,7 @@ def rotate(lab_spec, types=None, force=False, dry_run=False):
         _wait_task(sddc, task, f"{t} certificate replacement")
         for b in batch:
             s = served_chain_check(b["resourceFqdn"])
-            leaf_serial = cert_info(x509.load_pem_x509_certificate(b["resourceCertificate"].encode()))["serial"]
+            leaf_serial = cert_info(x509.load_pem_x509_certificate(_pems(b["certificateChain"])[0].encode()))["serial"]
             ok = s["verified"] and s.get("serial") == leaf_serial
             liblog.print_logs(f"    {b['resourceFqdn']}: served chain {'verifies to the lab root' if ok else 'NOT verified: ' + s['detail'][:100]}"
                               + ("" if s.get("serial") == leaf_serial else " (endpoint still serves the old certificate)"))
@@ -590,7 +623,7 @@ def _report_markdown(rep):
               "| Type | FQDN | Issuer (SDDC Manager) | Expires | Days left | Served chain verifies to lab root |",
               "|---|---|---|---|---|---|"]
         L += [f"| {c['type']} | {c['fqdn']} | {c['issued_by']} | {c['not_after']} | {c['days_left']} | "
-              f"{'yes' if c.get('served_verified') else 'NO: ' + str(c.get('served_detail', ''))[:60]} |"
+              f"{('yes' if c.get('full_chain') else 'yes (endpoint sends leaf only)') if c.get('served_verified') else 'NO: ' + str(c.get('served_detail', ''))[:60]} |"
               for c in rep["vcf"]["certificates"]]
     if rep.get("rotations"):
         L += ["", "## Recent rotations", "", "| Time | Mode | Resources |", "|---|---|---|"]

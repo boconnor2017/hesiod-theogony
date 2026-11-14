@@ -324,3 +324,46 @@ Generate a markdown file showing readiness of the password vault and secrets.
 ```
 sudo python3 hesiod-theogony.py -m9 --report
 ``` 
+
+## Module 10: Deploy a Certificate Authority and Rotate Certs
+This script uses the configuration from `lab_spec.json` in Module 1 to build a `step-ca` Kubernetes pod on HKS from Module 2 and rotates certificates using SDDC Manager from Module 8.
+
+```
+"certificate_authority" : {
+    "hostname" : "<sample: ca>",
+    "ip_address" : "<sample: 10.0.1.6>",
+    "name" : "<sample: Hesiod Lab CA>",
+    "key_size" : 4096,
+    "leaf_validity_days" : 365,
+    "renew_within_days" : 30,
+    "rotate_types" : ["VCENTER", "NSXT_MANAGER", "ESXI", "SDDC_MANAGER"],
+    "csr" : {
+        "country" : "<sample: US>",
+        "state" : "<sample: Virginia>",
+        "locality" : "<sample: Reston>",
+        "organization" : "<sample: Hesiod>",
+        "organizationUnit" : "<sample: MPC>"
+    },
+    "node" : "<optional: HKS node that holds the CA data; delete this line to use the first Ready worker>",
+    "data_path" : "/var/lib/hesiod/step-ca"
+    }
+```
+
+**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+
+Deploy Certificate Authority
+```
+sudo python3 hesiod-theogony.py -m10
+``` 
+Generate CSRs and Keys and ask SDDC Manager to validate them
+```
+sudo python3 hesiod-theogony.py -m10 --rotate --dry-run
+``` 
+Rotate certificates for all VCF components
+```
+sudo python3 hesiod-theogony.py -m10 --rotate
+``` 
+Generate a markdown file showing readiness of the certificate rotation process.
+```
+sudo python3 hesiod-theogony.py -m10 --report
+``` 
