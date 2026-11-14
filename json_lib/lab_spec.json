@@ -174,10 +174,10 @@
     "backup" : {
         "hostname" : "<sample: sftp>",
         "ip_address" : "<sample: 10.0.1.5>",
-        "username" : "svc-mpc-backup",
+        "username" : "svc-vcf-backup",
         "use_these_credentials" : 6,
         "passphrase_credentials" : 7,
-        "directory" : "/backup/mpc",
+        "directory" : "/backup/vcf",
         "vcf_uses_fqdn" : true,
         "schedule" : {
             "hour" : 2,

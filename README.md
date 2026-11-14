@@ -367,3 +367,49 @@ Generate a markdown file showing readiness of the certificate rotation process.
 ```
 sudo python3 hesiod-theogony.py -m10 --report
 ``` 
+
+## Module 11: Deploy an SFTP Server and Configure Backups
+This script uses the configuration from `lab_spec.json` in Module 1 to build a lightweight sftp Kubernetes pod on HKS from Module 2 and configures backups for components deployed in Module 8.
+
+```
+"backup" : {
+    "hostname" : "<sample: sftp>",
+    "ip_address" : "<sample: 10.0.1.5>",
+    "username" : "svc-vcf-backup",
+    "use_these_credentials" : 6,
+    "passphrase_credentials" : 7,
+    "directory" : "/backup/vcf",
+    "vcf_uses_fqdn" : true,
+    "schedule" : {
+        "hour" : 2,
+        "minute" : 0,
+        "vcenter_minute" : 15,
+        "retain" : 7
+    },
+    "node" : "<optional: HKS node that holds the backups; delete this line to use the first Ready worker>",
+    "data_path" : "/var/lib/hesiod/sftp"
+    }
+```
+
+**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+
+Deploy SFTP server.
+```
+sudo python3 hesiod-theogony.py -m11
+``` 
+Asks SDDC Manager and vCenter to validate the backup settings. Nothing is saved.
+```
+sudo python3 hesiod-theogony.py -m11 --configure --dry-run
+``` 
+Saves the backup settings in SDDC Manager, which also passes them to NSX, and in vCenter.
+```
+sudo python3 hesiod-theogony.py -m11 --configure
+``` 
+Runs a manual backup of SDDC Manager, NSX, and vCenter, and waits for each.
+```
+sudo python3 hesiod-theogony.py -m11 --backup-now
+``` 
+Generate a markdown file showing readiness of the backup process.
+```
+sudo python3 hesiod-theogony.py -m11 --report
+``` 

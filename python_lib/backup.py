@@ -3,7 +3,7 @@
 #              that point the management domain's backups at it.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.2 (NSX manual backup is long-running; NSX folder recognised in the report)
 #
 # Why SFTP: SDDC Manager and NSX Manager back up only to SFTP (VCF 9.1 sets this in SDDC Manager, which is also what
 # VCF Operations > Administration > SDDC Manager > Backup Settings writes to). vCenter's file-based backup also speaks SFTP,
@@ -422,12 +422,15 @@ def configure(lab_spec, dry_run=False):
                     "parts": [], "recurrence_info": {"hour": cfg["hour"], "minute": cfg["vcenter_minute"],
                                                      "days": [d for d in DAYS]},
                     "retention_info": {"max_count": cfg["retain"]}}
+        # vCenter keeps one schedule. Create: POST .../schedules {schedule, spec}. Update: PATCH .../schedules/{id} with the spec.
         existing = vc.call("GET", "/api/appliance/recovery/backup/schedules") or {}
-        if "default" in existing:
-            vc.call("PUT", "/api/appliance/recovery/backup/schedules/default", schedule)
+        sid = "default" if "default" in existing else next(iter(existing), None)
+        if sid:
+            vc.call("PATCH", f"/api/appliance/recovery/backup/schedules/{sid}", schedule)
+            liblog.print_logs(f"    vCenter backup schedule '{sid}' updated.")
         else:
-            vc.call("POST", "/api/appliance/recovery/backup/schedules/default", schedule)
-        liblog.print_logs("    vCenter backup schedule 'default' saved.")
+            vc.call("POST", "/api/appliance/recovery/backup/schedules", {"schedule": "default", "spec": schedule})
+            liblog.print_logs("    vCenter backup schedule 'default' created.")
 
     done = "validated (dry run, nothing saved)" if dry_run else "configured"
     liblog.print_logs(f"Backups {done}: SDDC Manager, NSX (pushed by SDDC Manager), vCenter.")
@@ -488,14 +491,23 @@ def backup_now(lab_spec):
     liblog.print_logs("(Backup 2) NSX Manager.")
     fqdn, s = _nsx_session(lab_spec)
     before = max([h["end_ms"] for h in nsx_backup_state(lab_spec).get("history") or []] or [0])
-    r = s.post(f"https://{fqdn}/api/v1/cluster?action=backup_to_remote", json={}, timeout=60)
-    if r.status_code >= 300:
+    # NSX holds this call open while it backs up, so a read timeout only means "still running": keep polling history.
+    try:
+        r = s.post(f"https://{fqdn}/api/v1/cluster?action=backup_to_remote", json={}, timeout=(15, 120))
+    except requests.exceptions.ReadTimeout:
+        liblog.print_logs("    NSX backup started (NSX is still answering the request); following its backup history.")
+        r = None
+    if r is not None and r.status_code >= 300:
         raise BackupError(f"NSX backup_to_remote: HTTP {r.status_code} {r.text[:300]} "
                           "(is the backup location configured? run -m11 --configure)")
     deadline = time.time() + 1800
     while time.time() < deadline:
         time.sleep(20)
-        newer = [h for h in nsx_backup_state(lab_spec).get("history") or [] if h["end_ms"] > before]
+        try:
+            newer = [h for h in nsx_backup_state(lab_spec).get("history") or [] if h["end_ms"] > before]
+        except requests.RequestException:
+            continue   # NSX can be slow to answer mid-backup
+
         if newer:
             last = newer[-1]
             if not last["success"]:
@@ -536,11 +548,13 @@ def backup_now(lab_spec):
 
 # ---------------------------------------------------------------- evidence report (-m11 --report)
 
-def _component_of(path, cfg):
+def _component_of(path, cfg, nsx_dir=None):
     rel = path[len(cfg["directory"]):].lstrip("/").lower()
     if rel.startswith("vcenter/"):
         return "vCenter"
-    if "/nsx/" in "/" + rel or "cluster-node-backups" in rel or "inventory-summary" in rel:
+    # SDDC Manager gives NSX its own folder: <directory>/<nsx fqdn>/ (cluster-node-backups/, inventory-summary/ ...)
+    if (nsx_dir and path.startswith(nsx_dir.rstrip("/") + "/")) or "/nsx/" in "/" + rel \
+            or "cluster-node-backups" in rel or "inventory-summary" in rel:
         return "NSX Manager"
     if "/lcm/" in "/" + rel:
         return "VCF Management (LCM)"
@@ -594,7 +608,8 @@ def evidence_report(lab_spec, out_dir="conf/evidence"):
     try:
         names = _plan(lab_spec)
         vc = _Vcenter(names["vcenter"], _vcf_password(lab_spec))
-        sched = (vc.call("GET", "/api/appliance/recovery/backup/schedules") or {}).get("default") or {}
+        all_sched = vc.call("GET", "/api/appliance/recovery/backup/schedules") or {}
+        sched = all_sched.get("default") or next(iter(all_sched.values()), {})
         rep["vcenter"] = {"fqdn": names["vcenter"], "location": sched.get("location"), "enabled": sched.get("enable"),
                           "recurrence": sched.get("recurrence_info"), "retention": sched.get("retention_info")}
         check("vCenter backs up to the lab SFTP target", bool(sched.get("enable")) and cfg["vcenter_dir"] in (sched.get("location") or ""),
@@ -606,7 +621,7 @@ def evidence_report(lab_spec, out_dir="conf/evidence"):
     files = list_backups(lab_spec)
     per = {}
     for f in files:
-        per.setdefault(_component_of(f["path"], cfg), []).append(f)
+        per.setdefault(_component_of(f["path"], cfg, (rep.get("nsx") or {}).get("directory")), []).append(f)
     rep["backups"] = {}
     for comp, fl in sorted(per.items()):
         days = sorted({datetime.date.fromtimestamp(f["mtime"]) for f in fl})
