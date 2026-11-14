@@ -21,6 +21,7 @@ from python_lib import esxi as libesxi
 from python_lib import vcf as libvcf
 from python_lib import conjur as libconjur
 from python_lib import ca as libca
+from python_lib import backup as libbackup
 
 # Local Functions
 def _main_(args):
@@ -75,6 +76,10 @@ def _main_(args):
         m10(args)
         std.sys.exit()
 
+    if '-m11' in args:
+        m11(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -110,6 +115,11 @@ def help_menu():
     print("         --force              with --rotate: rotate even certificates that are current and from the lab CA")
     print("         --test               US-004 issuance test only")
     print("         --report             evidence report: CA, US-004 test, VCF certificates, rotation history")
+    print("    -m11: (Module 11) Deploy the SFTP backup target on HKS and test it (US-006). No VCF changes.")
+    print("         --configure          point SDDC Manager, NSX and vCenter backups at it (daily, retention from lab_spec)")
+    print("         --dry-run            with --configure: VCF validations only, nothing saved")
+    print("         --backup-now         manual backup of SDDC Manager, NSX and vCenter, each waited on")
+    print("         --report             evidence report: target test, configuration, backups on the target")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -371,6 +381,38 @@ def m10(args):
     finally:
         print("=========================================================")
         print("Module 10 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m11(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 11")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--report" in args:
+            report = libbackup.evidence_report(lab_spec_py)
+            if report["result"] != "PASS":
+                std.sys.exit(1)
+            return
+        if "--configure" in args:
+            libbackup.configure(lab_spec_py, dry_run=("--dry-run" in args))
+            return
+        if "--backup-now" in args:
+            libbackup.backup_now(lab_spec_py)
+            return
+        libk8.deploy_sftp(lab_spec_py)
+        libbackup.vault_secrets(lab_spec_py)
+        liblog.print_logs("US-006 backup target test:")
+        result = libbackup.test_target(lab_spec_py)
+        if any(c["result"] != "PASS" for c in result["checks"]):
+            std.sys.exit(1)
+    except (libbackup.BackupError, libconjur.ConjurError, libvcf.VcfError, RuntimeError) as e:
+        liblog.print_logs("Module 11 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 11 runtime is completed.")
         print("=========================================================")
         print("")
 

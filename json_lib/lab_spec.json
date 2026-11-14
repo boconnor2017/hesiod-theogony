@@ -28,6 +28,14 @@
         "system" : "conjur",
         "username" : "admin",
         "password" : "<sample: Hesiod-Vault-91! (12+ chars, 2 upper, 2 lower, 1 digit, 1 special)>"
+    },{
+        "system" : "sftp_backup",
+        "username" : "svc-mpc-backup",
+        "password" : "<sample: Backup-Pass-91! (no ':')>"
+    },{
+        "system" : "backup_encryption",
+        "username" : "<not used: backup encryption passphrase>",
+        "password" : "<sample: Hesiod-Bkp-91! (12-20 chars, upper, lower, digit, special)>"
     }],
 
     "domain" : {
@@ -161,6 +169,24 @@
         },
         "node" : "<optional: HKS node that holds the CA data; delete this line to use the first Ready worker>",
         "data_path" : "/var/lib/hesiod/step-ca"
+    },
+
+    "backup" : {
+        "hostname" : "<sample: sftp>",
+        "ip_address" : "<sample: 10.0.1.5>",
+        "username" : "svc-mpc-backup",
+        "use_these_credentials" : 6,
+        "passphrase_credentials" : 7,
+        "directory" : "/backup/mpc",
+        "vcf_uses_fqdn" : true,
+        "schedule" : {
+            "hour" : 2,
+            "minute" : 0,
+            "vcenter_minute" : 15,
+            "retain" : 7
+        },
+        "node" : "<optional: HKS node that holds the backups; delete this line to use the first Ready worker>",
+        "data_path" : "/var/lib/hesiod/sftp"
     },
 
     "ldap" : {

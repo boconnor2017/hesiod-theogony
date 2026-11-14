@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sftp
+---
+# OpenSSH settings for the backup target (design: ECDSA-256 + RSA-2048 host keys, hmac-sha2-256).
+# Chrooted, SFTP only; password login is for VCF (SDDC Manager, NSX, vCenter), key login for operators/tests.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sftp-sshd
+  namespace: sftp
+data:
+  sshd_config: |
+    Protocol 2
+    HostKey /etc/ssh/ssh_host_ecdsa_key
+    HostKey /etc/ssh/ssh_host_rsa_key
+    HostKeyAlgorithms ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256
+    MACs hmac-sha2-256,hmac-sha2-512,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+    UseDNS no
+    PermitRootLogin no
+    PasswordAuthentication yes
+    PubkeyAuthentication yes
+    X11Forwarding no
+    AllowTcpForwarding no
+    LogLevel INFO
+    Subsystem sftp internal-sftp
+    ForceCommand internal-sftp
+    ChrootDirectory %h
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sftp
+  namespace: sftp
+  labels:
+    app: sftp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sftp
+  template:
+    metadata:
+      labels:
+        app: sftp
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: ID:SFTP-002
+      containers:
+      - name: sftp
+        image: atmoz/sftp:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 22
+        readinessProbe:
+          tcpSocket:
+            port: 22
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: data
+          mountPath: ID:SFTP-005
+        - name: users
+          mountPath: /etc/sftp/users.conf
+          subPath: users.conf
+          readOnly: true
+        - name: users
+          mountPath: ID:SFTP-006
+          subPath: client_key.pub
+          readOnly: true
+        - name: sshd
+          mountPath: /etc/ssh/sshd_config
+          subPath: sshd_config
+          readOnly: true
+        - name: hostkeys
+          mountPath: /etc/ssh/ssh_host_ecdsa_key
+          subPath: ssh_host_ecdsa_key
+          readOnly: true
+        - name: hostkeys
+          mountPath: /etc/ssh/ssh_host_rsa_key
+          subPath: ssh_host_rsa_key
+          readOnly: true
+      volumes:
+      - name: data
+        hostPath:
+          path: ID:SFTP-003
+          type: DirectoryOrCreate
+      - name: users
+        secret:
+          secretName: sftp-users
+      - name: sshd
+        configMap:
+          name: sftp-sshd
+      - name: hostkeys
+        secret:
+          secretName: sftp-hostkeys
+          defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sftp-service
+  namespace: sftp
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: ID:SFTP-001
+spec:
+  type: LoadBalancer
+  selector:
+    app: sftp
+  ports:
+  - name: sftp
+    port: 22
+    targetPort: 22

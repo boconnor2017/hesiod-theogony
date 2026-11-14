@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.2 (deploy_step_ca + exec_in_pod for Module 10)
+# Version: 2.3 (deploy_sftp for Module 11)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -509,6 +509,114 @@ def deploy_step_ca(lab_spec):
 
     liblog.print_logs(f"step-ca deployed. API: https://{ca_fqdn}  Root: {paths['root']}")
     return ca_ip
+
+def _upsert_secret(v1, namespace, name, string_data):
+    # Create the secret, or replace it when its content changed. Returns True when something changed.
+    try:
+        current = v1.read_namespaced_secret(name, namespace)
+        existing = {k: std.base64.b64decode(v).decode() for k, v in (current.data or {}).items()}
+        if existing == string_data:
+            return False
+        current.data, current.string_data = None, string_data
+        v1.replace_namespaced_secret(name, namespace, current)
+        liblog.print_logs(f"    Secret {namespace}/{name} updated.")
+        return True
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+    v1.create_namespaced_secret(namespace, std.client.V1Secret(
+        metadata=std.client.V1ObjectMeta(name=name, namespace=namespace), type="Opaque", string_data=string_data))
+    liblog.print_logs(f"    Secret {namespace}/{name} created.")
+    return True
+
+def deploy_sftp(lab_spec):
+    liblog.print_logs("Instantiating deploy_sftp() function.")
+    # Prerequisites: MetalLB + Technitium (Module 3) and the DNS zone (Module 4).
+    from python_lib import backup as libbackup
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    cfg = libbackup.backup_settings(lab_spec)
+    sftp_ip, sftp_fqdn, user = cfg["ip"], cfg["fqdn"], cfg["username"]
+
+    # Step 1: Make sure MetalLB can hand out the SFTP IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+sftp_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, sftp_ip, "sftp-ip-pool")
+
+    # Step 2: Namespace + secrets. Host keys once (a new key would change the fingerprint VCF pins);
+    # the user file every run (follows the password in lab_spec).
+    liblog.print_logs("(Step 2) Create namespace, host keys and the backup user.")
+    create_namespace(kube_config_path, "sftp")
+    std.config.load_kube_config(config_file=kube_config_path)
+    v1 = std.client.CoreV1Api()
+    host_keys = libbackup.new_host_keys()
+    _conjur_create_secret_once(v1, "sftp-hostkeys", "Opaque", host_keys, namespace="sftp")
+    stored = v1.read_namespaced_secret("sftp-hostkeys", "sftp").data
+    libbackup.record_host_keys({k: std.base64.b64decode(v).decode() for k, v in stored.items()})
+    client_pub = libbackup.client_key()["public"]
+    users_changed = _upsert_secret(v1, "sftp", "sftp-users", {
+        "users.conf": f"{user}:{cfg['password']}:{cfg['uid']}:100:{cfg['chroot_dirs']}\n",
+        "client_key.pub": client_pub + "\n"})
+
+    # Step 3: Generate deploy_sftp.yaml from scripts_lib/k8_deploy_sftp_yaml.script
+    liblog.print_logs("(Step 3) Generate deploy_sftp.yaml file.")
+    node = _conjur_pick_node(kube_config_path, cfg["node"], namespace="sftp", deployment="sftp")
+    liblog.print_logs(f"    SFTP pinned to node {node}; backups stored in {cfg['data_path']} on that node.")
+    yaml_name = "deploy_sftp.yaml"
+    raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_sftp_yaml.script")
+    libvmw.write_script_to_script_file(raw.splitlines(), yaml_name)
+    replacements = {
+        "ID:SFTP-001": sftp_ip,                                   # metallb.universe.tf/loadBalancerIPs
+        "ID:SFTP-002": node,                                      # nodeSelector kubernetes.io/hostname
+        "ID:SFTP-003": cfg["data_path"],                          # hostPath for the backups
+        "ID:SFTP-005": f"/home/{user}/{cfg['mount_dir']}",        # where the hostPath appears inside the chroot
+        "ID:SFTP-006": f"/home/{user}/.ssh/keys/client_key.pub",  # ECDSA public key for key login
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), yaml_name)
+
+    # Step 4: Deploy
+    liblog.print_logs("(Step 4) Deploy the SFTP server.")
+    delete_service_if_ip_mismatch(kube_config_path, "sftp", "sftp-service", sftp_ip)
+    try:
+        apply_from_yaml(kube_config_path, yaml_name, "sftp")
+    finally:
+        libvmw.delete_script_file(yaml_name)
+    if users_changed:
+        # subPath mounts never refresh: restart the pod so a changed password/key takes effect
+        try:
+            apps = std.client.AppsV1Api()
+            stamp = std.datetime.now().strftime("%Y%m%d%H%M%S")
+            apps.patch_namespaced_deployment("sftp", "sftp", {"spec": {"template": {"metadata": {
+                "annotations": {"hesiod/restarted-at": stamp}}}}})
+            liblog.print_logs("    Backup user changed: SFTP pod restarted to pick it up.")
+        except std.ApiException as e:
+            liblog.print_logs(f"    WARNING: could not restart the SFTP pod ({e.status}); run: kubectl -n sftp rollout restart deploy/sftp")
+    std.time.sleep(5)
+    pause_for_pods_until_running(kube_config_path, "sftp", 300)
+    service_ip = get_load_balancer_ip(kube_config_path, "sftp", "sftp-service")
+    liblog.print_logs(f"SFTP service external IP: {service_ip}")
+    if service_ip != sftp_ip:
+        raise RuntimeError(f"SFTP service got external IP {service_ip}, expected {sftp_ip}. "
+                           f"Check: kubectl -n sftp describe svc sftp-service")
+    libbackup.wait_until_ready(sftp_ip, 300)
+
+    # Step 5: Register in Technitium DNS
+    liblog.print_logs("(Step 5) Register "+sftp_fqdn+" in Technitium DNS.")
+    try:
+        domain_name = lab_spec["domain"]["name"]
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, sftp_fqdn, domain_name, sftp_ip)
+            liblog.print_logs("    Added A record: "+sftp_fqdn+" -> "+sftp_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, SFTP is still deployed: {e}")
+
+    liblog.print_logs(f"SFTP deployed: sftp://{user}@{sftp_fqdn}:22{cfg['directory']}  "
+                      f"host key {libbackup.host_fingerprint()}")
+    return sftp_ip
 
 def deploy_technitium(lab_spec):
     liblog.print_logs("Instantiating deploy_technitium() function.")
