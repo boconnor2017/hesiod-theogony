@@ -192,7 +192,7 @@
     "key_management" : {
         "hostname" : "<sample: kmip>",
         "ip_address" : "<sample: 10.0.1.3>",
-        "provider_name" : "<sample: kms-mpc>",
+        "provider_name" : "<sample: kms-vcf>",
         "server_name" : "kmip01",
         "set_default" : true,
         "cluster" : "<optional: vSAN cluster name; delete this line to use the management cluster from vcf.naming_convention>",

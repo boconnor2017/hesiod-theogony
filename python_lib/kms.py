@@ -3,7 +3,7 @@
 #              management vCenter as a Standard Key Provider, then used for vSAN data-at-rest encryption.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.2 (ECDSA P-256 server certificate; client-auth check needs a TLS-level refusal)
 #
 # Why PyKMIP: vSAN encryption needs a KMIP server. OpenBao's KMIP support is a client (seal) only, and the KMIP
 # secrets engine is a Vault Enterprise feature. PyKMIP is the open-source KMIP reference server: fine for a lab,
@@ -41,7 +41,7 @@ import time
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim, VmomiSupport, SoapStubAdapter
@@ -74,10 +74,11 @@ def kms_settings(lab_spec):
     }
 
 
-def _issue(lab_spec, cn, sans_dns, sans_ip=()):
-    """New RSA 2048 key + certificate from the lab CA. Returns (key_pem, leaf_pem, intermediate_pem, root_pem)."""
+def _issue(lab_spec, cn, sans_dns, sans_ip=(), key_type="rsa"):
+    """New key (RSA 2048 or ECDSA P-256) + certificate from the lab CA. Returns (key_pem, leaf, intermediate, root)."""
     import ipaddress
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key = (ec.generate_private_key(ec.SECP256R1()) if key_type == "ecdsa"
+           else rsa.generate_private_key(public_exponent=65537, key_size=2048))
     names = [x509.DNSName(d) for d in sans_dns] + [x509.IPAddress(ipaddress.ip_address(i)) for i in sans_ip]
     csr = (x509.CertificateSigningRequestBuilder()
            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
@@ -95,7 +96,9 @@ def _days_left(pem):
 
 
 def server_tls(lab_spec, current=None):
-    """Secret kmip-tls content. Keeps the current certificate unless missing, expiring (<30d) or for another name/IP."""
+    """Secret kmip-tls content. Keeps the current certificate unless missing, expiring (<30d), for another name/IP,
+    or RSA. The server key must be ECDSA: PyKMIP's TLS 1.2 suite offers AES-GCM only with ECDSA certificates
+    (ECDHE-ECDSA-AES128/256-GCM); with RSA it offers only CBC suites, which vCenter 9's TLS profile refuses."""
     cfg = kms_settings(lab_spec)
     if current and current.get("server.crt"):
         cert = x509.load_pem_x509_certificate(current["server.crt"].encode())
@@ -103,11 +106,14 @@ def server_tls(lab_spec, current=None):
             san = [str(n.value) for n in cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value]
         except x509.ExtensionNotFound:
             san = []
-        if _days_left(current["server.crt"]) > 30 and cfg["fqdn"] in san and cfg["ip"] in san:
+        if isinstance(cert.public_key(), rsa.RSAPublicKey):
+            liblog.print_logs("    KMIP server certificate is RSA (CBC-only ciphers with PyKMIP): replacing it with ECDSA P-256.")
+        elif _days_left(current["server.crt"]) > 30 and cfg["fqdn"] in san and cfg["ip"] in san:
             liblog.print_logs(f"    KMIP server certificate current ({_days_left(current['server.crt'])} days left). Keeping it.")
             return current
-    key, leaf, inter, root = _issue(lab_spec, cfg["fqdn"], [cfg["fqdn"], "localhost"], [cfg["ip"], "127.0.0.1"])
-    liblog.print_logs(f"    KMIP server certificate issued by the lab CA for {cfg['fqdn']} / {cfg['ip']}.")
+    key, leaf, inter, root = _issue(lab_spec, cfg["fqdn"], [cfg["fqdn"], "localhost"], [cfg["ip"], "127.0.0.1"],
+                                    key_type="ecdsa")
+    liblog.print_logs(f"    KMIP server certificate (ECDSA P-256) issued by the lab CA for {cfg['fqdn']} / {cfg['ip']}.")
     return {"server.crt": leaf.strip() + "\n" + inter.strip() + "\n", "server.key": key,
             "ca_bundle.crt": inter.strip() + "\n" + root.strip() + "\n"}
 
@@ -166,6 +172,9 @@ def _mtls(host, ip, client=None):
     if hasattr(ssl, "VERIFY_X509_STRICT"):
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2    # PyKMIP's auth suite; TLS 1.3 defers client-cert checks
+    # Offer only what vCenter 9 offers (ECDHE + AES-GCM), so this test fails the way vCenter would
+    ctx.set_ciphers("ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:"
+                    "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256")
     if client:
         ctx.load_cert_chain(*client)
     with socket.create_connection((ip, 5696), timeout=10) as sock:
@@ -220,8 +229,10 @@ def test_kms(lab_spec):
     try:
         _mtls(cfg["fqdn"], cfg["ip"], None)
         check("Connection without a client certificate is refused", False, "accepted (client auth not enforced)")
-    except (ssl.SSLError, ConnectionResetError, OSError) as e:
-        check("Connection without a client certificate is refused", True, type(e).__name__)
+    except (ssl.SSLError, ConnectionResetError) as e:
+        check("Connection without a client certificate is refused", True, f"TLS: {type(e).__name__}")
+    except OSError as e:   # e.g. connection refused: nothing listening, which proves nothing about client auth
+        check("Connection without a client certificate is refused", False, f"server not reachable: {e}")
     ok, detail = _pod_kmip_test(lab_spec)
     check("KMIP operations (PyKMIP client)", ok, detail)
     return {"checks": checks}

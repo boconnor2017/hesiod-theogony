@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.4 (deploy_kmip for Module 12)
+# Version: 2.5 (wait_for_rollout after pod restarts: deploy_sftp, deploy_kmip)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -510,6 +510,25 @@ def deploy_step_ca(lab_spec):
     liblog.print_logs(f"step-ca deployed. API: https://{ca_fqdn}  Root: {paths['root']}")
     return ca_ip
 
+def wait_for_rollout(local_kube_config_path, namespace, name, timeout_seconds=600):
+    # Waits until a Deployment has finished rolling out: new pod Ready, old pod gone. A plain "pods Running" check
+    # can pass on the OLD pod right after a restart and then find nothing listening once it terminates.
+    std.config.load_kube_config(config_file=local_kube_config_path)
+    apps, v1 = std.client.AppsV1Api(), std.client.CoreV1Api()
+    deadline = std.time.time() + timeout_seconds
+    while std.time.time() < deadline:
+        d = apps.read_namespaced_deployment(name, namespace)
+        st, want = d.status, d.spec.replicas or 1
+        pods = [p for p in v1.list_namespaced_pod(namespace, label_selector=f"app={name}").items]
+        if (st.observed_generation or 0) >= d.metadata.generation and (st.updated_replicas or 0) == want \
+                and (st.ready_replicas or 0) == want and (st.replicas or 0) == want and len(pods) == want \
+                and not any(p.metadata.deletion_timestamp for p in pods):
+            liblog.print_logs(f"Deployment {namespace}/{name} rolled out.")
+            return True
+        std.time.sleep(5)
+    raise RuntimeError(f"Deployment {namespace}/{name} not rolled out after {timeout_seconds}s. "
+                       f"Check: kubectl -n {namespace} get pods; kubectl -n {namespace} describe deploy/{name}")
+
 def _upsert_secret(v1, namespace, name, string_data):
     # Create the secret, or replace it when its content changed. Returns True when something changed.
     try:
@@ -592,6 +611,7 @@ def deploy_sftp(lab_spec):
             liblog.print_logs(f"    WARNING: could not restart the SFTP pod ({e.status}); run: kubectl -n sftp rollout restart deploy/sftp")
     std.time.sleep(5)
     pause_for_pods_until_running(kube_config_path, "sftp", 300)
+    wait_for_rollout(kube_config_path, "sftp", "sftp", 300)
     service_ip = get_load_balancer_ip(kube_config_path, "sftp", "sftp-service")
     liblog.print_logs(f"SFTP service external IP: {service_ip}")
     if service_ip != sftp_ip:
@@ -673,6 +693,7 @@ def deploy_kmip(lab_spec):
         liblog.print_logs("    New server certificate: KMIP pod restarted to pick it up.")
     std.time.sleep(5)
     pause_for_pods_until_running(kube_config_path, "kmip", 600)
+    wait_for_rollout(kube_config_path, "kmip", "kmip", 600)
     service_ip = get_load_balancer_ip(kube_config_path, "kmip", "kmip-service")
     liblog.print_logs(f"KMIP service external IP: {service_ip}")
     if service_ip != kmip_ip:
