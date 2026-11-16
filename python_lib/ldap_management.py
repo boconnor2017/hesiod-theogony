@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage ldap services
 # Author: Brendan O'Connor
-# Version: 1.1 (OpenLDAP for VCF SSO: refresh_openldap_users, openldap_checks, write_vcf_sso_sheet)
+# Version: 1.2 (OpenLDAP for VCF SSO; groups are groupOfNames/member, the VCF wizard default)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -159,12 +159,15 @@ def refresh_vcf_ldap_users(lab_spec):
 #          cn=admin,<base DN>            directory admin           (lab_spec["openldap"]["use_these_credentials"])
 #          cn=<readonly>,<base DN>       read-only bind for VCF    (lab_spec["openldap"]["readonly_credentials"])
 #          ou=people,<base DN>           users   (inetOrgPerson, uid=...)
-#          ou=groups,<base DN>           groups  (groupOfUniqueNames, cn=..., uniqueMember -> memberOf on the user)
+#          ou=groups,<base DN>           groups  (groupOfNames, cn=..., member -> memberOf on the user)
+# groupOfNames/member is what the VCF SSO OpenLDAP wizard uses by default. osixia ships the memberOf overlay set to
+# groupOfUniqueNames/uniqueMember; Module 6 switches the overlay (ensure_memberof_config) and migrates old groups.
 # Module 6 reconciles instead of delete-and-recreate: entries keep their entryUUID, which is how the Identity Broker
 # tracks users and groups between syncs (recreated entries would look like new users and lose their role mappings).
 # =====================================================================================================================
 
 OPENLDAP_STATE_DIR = "conf/openldap"
+GROUP_OC, MEMBER_ATTR = "groupOfNames", "member"
 FFDHE2048 = """-----BEGIN DH PARAMETERS-----
 MIIBCAKCAQEA//////////+t+FRYortKmq/cViAnPTzx2LnFg84tNpWp4TZBFGQz
 +8yTnc4kmz75fS/jY2MMddj2gbICrsRhetPfHtXV/WVhJDP1H18GbtCFY2VVPe0a
@@ -356,6 +359,47 @@ def ensure_readonly_acl(lab_spec):
     return True
 
 
+def _ldapi(cfg, script, timeout=60):
+    from python_lib import k8_management as libk8
+    return libk8.exec_in_pod(cfg["kube"], "openldap", "app=openldap", "openldap", script, timeout)
+
+
+def ensure_memberof_config(lab_spec):
+    """memberOf overlay -> groupOfNames/member, refint -> member (cn=config over ldapi, as the container's root)."""
+    import re
+    cfg = openldap_settings(lab_spec)
+    rc, out = _ldapi(cfg, 'ldapsearch -Q -Y EXTERNAL -H ldapi:/// -LLL -o ldif-wrap=no -b cn=config '
+                          '"(|(objectClass=olcMemberOf)(objectClass=olcRefintConfig))" dn olcMemberOfGroupOC '
+                          'olcMemberOfMemberAD olcRefintAttribute')
+    if rc != 0:
+        raise OpenLdapError(f"cannot read the overlay configuration over ldapi: {out.strip()[-300:]}")
+    changes = []
+    for block in out.strip().split("\n\n"):
+        dn = re.search(r"^dn: (.+)$", block, re.M)
+        if not dn:
+            continue
+        dn = dn.group(1)
+        if "olcMemberOfGroupOC" in block or "memberof" in dn.lower():
+            oc = re.search(r"^olcMemberOfGroupOC: (.+)$", block, re.M)
+            ad = re.search(r"^olcMemberOfMemberAD: (.+)$", block, re.M)
+            if not oc or oc.group(1) != GROUP_OC or not ad or ad.group(1) != MEMBER_ATTR:
+                changes.append(f"dn: {dn}\nchangetype: modify\nreplace: olcMemberOfGroupOC\nolcMemberOfGroupOC: {GROUP_OC}\n-\n"
+                               f"replace: olcMemberOfMemberAD\nolcMemberOfMemberAD: {MEMBER_ATTR}\n")
+        elif "refint" in dn.lower():
+            attrs = [a.lower() for a in re.findall(r"^olcRefintAttribute: (.+)$", block, re.M) for a in a.split()]
+            if MEMBER_ATTR.lower() not in attrs:
+                changes.append(f"dn: {dn}\nchangetype: modify\nadd: olcRefintAttribute\nolcRefintAttribute: {MEMBER_ATTR}\n")
+    if not changes:
+        liblog.print_logs(f"    memberOf overlay already on {GROUP_OC}/{MEMBER_ATTR}.")
+        return False
+    ldif = "\n".join(changes)
+    rc, out = _ldapi(cfg, f"ldapmodify -Q -Y EXTERNAL -H ldapi:/// <<'LDIF'\n{ldif}LDIF")
+    if rc != 0:
+        raise OpenLdapError(f"cannot update the memberOf/refint overlays: {out.strip()[-300:]}")
+    liblog.print_logs(f"    memberOf overlay switched to {GROUP_OC}/{MEMBER_ATTR} (refint covers {MEMBER_ATTR}).")
+    return True
+
+
 def _ensure_ou(conn, dn):
     import ldap3
     if conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE):
@@ -440,6 +484,14 @@ def refresh_openldap_users(lab_spec):
                 liblog.print_logs(f"    Password set for {uid}")
 
     liblog.print_logs("(Step 3) Groups and memberships from lab_spec.")
+    # One-time migration: groups created as groupOfUniqueNames (earlier -m6) cannot change structural class in place.
+    # Delete them while the overlay still tracks them (so memberOf is cleaned), then switch the overlay, then recreate.
+    conn.search(cfg["groups_dn"], "(objectClass=groupOfUniqueNames)", search_scope=ldap3.LEVEL, attributes=["cn"])
+    for e in list(conn.entries):
+        conn.delete(e.entry_dn)
+        _check(conn, f"delete {e.entry_dn}")
+        liblog.print_logs(f"    Migrating {e.entry_dn}: removed (recreated as {GROUP_OC} below)")
+    ensure_memberof_config(lab_spec)
     members_by_index = {i: [] for i in range(len(spec.get("groups", [])))}
     for u in users_spec:
         dn = f"uid={escape_rdn(u['username'])},{cfg['people_dn']}"
@@ -452,10 +504,10 @@ def refresh_openldap_users(lab_spec):
         if str(g.get("name", "")).startswith("<"):
             continue
         dn = f"cn={escape_rdn(g['name'])},{cfg['groups_dn']}"
-        # groupOfUniqueNames needs at least one member: an empty group holds the admin DN (not a person, so VCF skips it)
+        # groupOfNames needs at least one member: an empty group holds the admin DN (not a person, so VCF skips it)
         wanted_g[dn.lower()] = (dn, g["name"], sorted(members_by_index[i]) or [cfg["admin_dn"]])
-    conn.search(cfg["groups_dn"], "(objectClass=groupOfUniqueNames)", search_scope=ldap3.LEVEL,
-                attributes=["cn", "uniqueMember"])
+    conn.search(cfg["groups_dn"], f"(objectClass={GROUP_OC})", search_scope=ldap3.LEVEL,
+                attributes=["cn", MEMBER_ATTR])
     existing_g = {e.entry_dn.lower(): e for e in conn.entries}
     for key, e in existing_g.items():
         if key not in wanted_g:
@@ -465,14 +517,14 @@ def refresh_openldap_users(lab_spec):
             liblog.print_logs(f"    Removed group {e.entry_dn}")
     for key, (dn, name, members) in wanted_g.items():
         if key not in existing_g:
-            conn.add(dn, ["groupOfUniqueNames", "top"], {"cn": name, "uniqueMember": members})
+            conn.add(dn, [GROUP_OC, "top"], {"cn": name, MEMBER_ATTR: members})
             _check(conn, f"add {dn}")
             summary["groups_added"] += 1
             liblog.print_logs(f"    Added group {name} ({len(members)} member(s))")
         else:
-            cur = sorted(m.lower() for m in existing_g[key]["uniqueMember"].values)
+            cur = sorted(m.lower() for m in existing_g[key][MEMBER_ATTR].values)
             if cur != sorted(m.lower() for m in members):
-                conn.modify(dn, {"uniqueMember": [(MODIFY_REPLACE, members)]})
+                conn.modify(dn, {MEMBER_ATTR: [(MODIFY_REPLACE, members)]})
                 _check(conn, f"update {dn}")
                 summary["groups_updated"] += 1
                 liblog.print_logs(f"    Updated group {name} members")
@@ -545,7 +597,7 @@ def write_vcf_sso_sheet(lab_spec):
             ("Base DN", cfg["base_dn"]),
             ("Bind user name", cfg["readonly_dn"]),
             ("Bind user password", f"lab_spec authentication entry {lab_spec['openldap']['readonly_credentials']} (also in Conjur after -m9 --export)"),
-            ("Groups filter", "(objectClass=groupOfUniqueNames)"),
+            ("Groups filter", f"(objectClass={GROUP_OC})"),
             ("Bind user filter", "(objectClass=organizationalRole)"),
             ("Users filter", "(objectClass=inetOrgPerson)"),
             ("Object UUID", "entryUUID"),
@@ -578,10 +630,10 @@ def write_ldap_evidence(lab_spec, checks):
               "entryUUID": str(e["entryUUID"].value),
               "groups": sorted(str(g).split(",")[0].split("=", 1)[1] for g in (e["memberOf"].values if "memberOf" in e.entry_attributes else []))}
              for e in conn.entries]
-    conn.search(cfg["groups_dn"], "(objectClass=groupOfUniqueNames)", search_scope=ldap3.LEVEL,
-                attributes=["cn", "entryUUID", "uniqueMember"])
+    conn.search(cfg["groups_dn"], f"(objectClass={GROUP_OC})", search_scope=ldap3.LEVEL,
+                attributes=["cn", "entryUUID", MEMBER_ATTR])
     groups = [{"cn": e["cn"].value, "entryUUID": str(e["entryUUID"].value),
-               "members": sorted(str(m).split(",")[0].split("=", 1)[1] for m in e["uniqueMember"].values
+               "members": sorted(str(m).split(",")[0].split("=", 1)[1] for m in e[MEMBER_ATTR].values
                                  if str(m).lower().startswith("uid="))} for e in conn.entries]
     conn.unbind()
     rep = {"generated": now.strftime("%Y-%m-%d %H:%M:%S"), "directory": f"ldaps://{cfg['fqdn']}:636",
