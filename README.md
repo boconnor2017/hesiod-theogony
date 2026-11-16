@@ -413,3 +413,48 @@ Generate a markdown file showing readiness of the backup process.
 ```
 sudo python3 hesiod-theogony.py -m11 --report
 ``` 
+
+## Module 12: Deploy a KMS Server and Encrypt vSAN
+This script uses the configuration from `lab_spec.json` in Module 1 to build a Key Management Server Kubernetes pod on HKS from Module 2 and configures data in motion and data at rest encryption on vSAN clusters deployed in Module 8.
+
+```
+"key_management" : {
+    "hostname" : "<sample: kmip>",
+    "ip_address" : "<sample: 10.0.1.3>",
+    "provider_name" : "<sample: kms-vcf>",
+    "server_name" : "kmip01",
+    "set_default" : true,
+    "cluster" : "<optional: vSAN cluster name; delete this line to use the management cluster from vcf.naming_convention>",
+    "allow_reduced_redundancy" : false,
+    "dit_rekey_minutes" : 1440,
+    "node" : "<optional: HKS node that holds the key database; delete this line to use the first Ready worker>",
+    "data_path" : "/var/lib/hesiod/kmip"
+    }
+```
+
+**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+
+Deploy KMS server.
+```
+sudo python3 hesiod-theogony.py -m12
+``` 
+Registers KMS in vCenter as a key provider called kms-mpc and sets up trust both ways. Then it checks the provider shows green and generates a test key through vCenter.
+```
+sudo python3 hesiod-theogony.py -m12 --configure
+``` 
+Turns on vSAN data-in-transit encryption only, with no reformat.
+```
+sudo python3 hesiod-theogony.py -m12 --in-transit-only
+``` 
+Turns on vSAN data-at-rest encryption with kms-mpc, plus in-transit if it isn’t on yet.
+```
+sudo python3 hesiod-theogony.py -m12 --encrypt-vsan
+``` 
+(Optional) Copies the key database to conf/kmip/ and to the SFTP backup target from Module 11.
+```
+sudo python3 hesiod-theogony.py -m12 --backup-keys
+``` 
+Generate a markdown file showing readiness of vSAN Encryption.
+```
+sudo python3 hesiod-theogony.py -m12 --report
+``` 

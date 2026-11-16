@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openldap
+---
+# OpenLDAP (osixia/openldap) for VCF Single Sign-On (Identity Broker, "OpenLDAP" identity provider).
+# Unlike LLDAP it has a real base entry (dc=..., objectClass dcObject) that the broker's domain retrieval reads, the
+# memberOf + refint overlays (groupOfUniqueNames / uniqueMember), and native entryUUID.
+# Bootstrap (base DN, admin, read-only user) happens once, on the first start with empty data directories.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openldap
+  namespace: openldap
+  labels:
+    app: openldap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openldap
+  template:
+    metadata:
+      labels:
+        app: openldap
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: ID:OLDAP-002
+      containers:
+      - name: openldap
+        image: osixia/openldap:1.5.0
+        imagePullPolicy: IfNotPresent
+        # ulimit: slapd sizes itself to the open-file limit; containerd's "infinity" makes it hang at start.
+        # --copy-service: the certificates are a read-only Secret mount; osixia copies them before use.
+        command: ["/bin/sh", "-c", "ulimit -n 1024 && exec /container/tool/run --copy-service"]
+        ports:
+        - containerPort: 389
+        - containerPort: 636
+        env:
+        - name: LDAP_ORGANISATION
+          value: ID:OLDAP-004
+        - name: LDAP_DOMAIN
+          value: ID:OLDAP-005
+        - name: LDAP_BASE_DN
+          value: ID:OLDAP-006
+        - name: LDAP_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-secrets
+              key: admin-password
+        - name: LDAP_CONFIG_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-secrets
+              key: config-password
+        - name: LDAP_READONLY_USER
+          value: "true"
+        - name: LDAP_READONLY_USER_USERNAME
+          value: ID:OLDAP-007
+        - name: LDAP_READONLY_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-secrets
+              key: readonly-password
+        - name: LDAP_TLS
+          value: "true"
+        - name: LDAP_TLS_CRT_FILENAME
+          value: "ldap.crt"
+        - name: LDAP_TLS_KEY_FILENAME
+          value: "ldap.key"
+        - name: LDAP_TLS_CA_CRT_FILENAME
+          value: "ca.crt"
+        - name: LDAP_TLS_DH_PARAM_FILENAME
+          value: "dhparam.pem"
+        - name: LDAP_TLS_VERIFY_CLIENT
+          value: "never"
+        - name: LDAP_TLS_ENFORCE
+          value: "false"
+        readinessProbe:
+          tcpSocket:
+            port: 389
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/ldap
+        - name: config
+          mountPath: /etc/ldap/slapd.d
+        - name: tls
+          mountPath: /container/service/slapd/assets/certs
+          readOnly: true
+      volumes:
+      - name: data
+        hostPath:
+          path: ID:OLDAP-003
+          type: DirectoryOrCreate
+      - name: config
+        hostPath:
+          path: ID:OLDAP-008
+          type: DirectoryOrCreate
+      - name: tls
+        secret:
+          secretName: openldap-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openldap-service
+  namespace: openldap
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: ID:OLDAP-001
+spec:
+  type: LoadBalancer
+  selector:
+    app: openldap
+  ports:
+  - name: ldap
+    port: 389
+    targetPort: 389
+  - name: ldaps
+    port: 636
+    targetPort: 636

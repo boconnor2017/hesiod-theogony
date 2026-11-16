@@ -36,6 +36,14 @@
         "system" : "backup_encryption",
         "username" : "<not used: backup encryption passphrase>",
         "password" : "<sample: Hesiod-Bkp-91! (12-20 chars, upper, lower, digit, special)>"
+    },{
+        "system" : "openldap_admin",
+        "username" : "<not used: always cn=admin,<base DN>>",
+        "password" : "<sample: VMware123!>"
+    },{
+        "system" : "openldap_readonly",
+        "username" : "readonly",
+        "password" : "<sample: VMware123!>"
     }],
 
     "domain" : {
@@ -141,6 +149,16 @@
         "hostname" : "<sample: ldap>",
         "ip_address" : "<sample: 10.0.1.8>",
         "use_these_credentials" : 0
+    },
+
+    "openldap" : {
+        "hostname" : "<sample: openldap>",
+        "ip_address" : "<sample: 10.0.1.8>",
+        "organisation" : "<sample: Hesiod>",
+        "use_these_credentials" : 8,
+        "readonly_credentials" : 9,
+        "node" : "<optional: HKS node that holds the directory; delete this line to use the first Ready worker>",
+        "data_path" : "/var/lib/hesiod/openldap"
     },
 
     "conjur" : {

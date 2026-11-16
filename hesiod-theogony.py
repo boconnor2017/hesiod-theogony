@@ -54,7 +54,7 @@ def _main_(args):
         std.sys.exit()
 
     if '-m5' in args:
-        m5()
+        m5(args)
         std.sys.exit()
 
     if '-m6' in args:
@@ -97,8 +97,9 @@ def help_menu():
     print("    -m2: (Module 2) Deploy Hesiod Kubernetes Services (HKS) Cluster.")
     print("    -m3: (Module 3) Deploy Technitium on HKS.")
     print("    -m4: (Module 4) Create DNS Zone and FQDNs on Technitium.")
-    print("    -m5: (Module 5) Deploy LLDAP on HKS.")
-    print("    -m6: (Module 6) Create Users/Groups on LLDAP.")
+    print("    -m5: (Module 5) Deploy OpenLDAP on HKS (VCF SSO identity source), check it, write the VCF SSO wizard values.")
+    print("         --checks             directory checks + wizard values only (no deployment)")
+    print("    -m6: (Module 6) Make OpenLDAP users/groups match lab_spec[\"ldap\"] (in place), check, write evidence.")
     print("    -m7: (Module 7) Build nested ESXi hosts from ISO (kickstart).")
     print("         MGT to build hosts for a Management cluster")
     print("         VI to build hosts for a VI cluster")
@@ -197,6 +198,7 @@ def install_pip_packages():
     libos.install_package("cryptography")
     std.subprocess.check_call(["apt", "-y", "install", "xorriso"])
     libos.install_package("dnspython")
+    libos.install_package("ldap3")
     std.subprocess.check_call(["apt", "-y", "install", "iputils-ping"])
     print("=========================================================")
     print("Init completed.")
@@ -255,12 +257,21 @@ def m4():
     print("")
     return
 
-def m5():
+def m5(args):
     print("=========================================================")
     print("Launching Theogony: MODULE 5")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
-    libk8.deploy_lldap(lab_spec_py)
+    try:
+        if "--checks" not in args:
+            libk8.deploy_openldap(lab_spec_py)
+        liblog.print_logs("Directory checks (VCF SSO identity source):")
+        libldap.openldap_checks(lab_spec_py, include_users=False)
+        libldap.write_vcf_sso_sheet(lab_spec_py)
+        liblog.print_logs("Next: -m6 loads the users and groups from lab_spec[\"ldap\"].")
+    except (libldap.OpenLdapError, RuntimeError) as e:
+        liblog.print_logs("Module 5 stopped: "+str(e))
+        std.sys.exit(1)
     print("=========================================================")
     print("Module 5 runtime is completed.")
     print("=========================================================")
@@ -274,9 +285,19 @@ def m6():
     print("Launching Theogony: MODULE 6")
     print("=========================================================")
     lab_spec_py = import_lab_configuration_parameters()
-    libldap.refresh_vcf_ldap_users(lab_spec_py)
+    try:
+        libldap.refresh_openldap_users(lab_spec_py)
+        liblog.print_logs("Directory checks (VCF SSO identity source):")
+        checks = libldap.openldap_checks(lab_spec_py)
+        libldap.write_vcf_sso_sheet(lab_spec_py)
+        report = libldap.write_ldap_evidence(lab_spec_py, checks)
+        if report["result"] != "PASS":
+            std.sys.exit(1)
+    except (libldap.OpenLdapError, RuntimeError) as e:
+        liblog.print_logs("Module 6 stopped: "+str(e))
+        std.sys.exit(1)
     print("=========================================================")
-    print("Module 5 runtime is completed.")
+    print("Module 6 runtime is completed.")
     print("=========================================================")
     print("")
     print("")

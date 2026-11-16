@@ -1,6 +1,6 @@
 # Description: Contains all necessary functions to run and manage kubernetes services
 # Author: Brendan O'Connor
-# Version: 2.5 (wait_for_rollout after pod restarts: deploy_sftp, deploy_kmip)
+# Version: 2.6 (deploy_openldap for Module 5: VCF SSO identity source)
 # Date: November 2026
 
 # Import Hesiod Libraries (Standard Imports)
@@ -224,6 +224,115 @@ def deploy_lldap(lab_spec):
 
     liblog.print_logs(f"LLDAP deployed. Web UI: http://{lldap_fqdn}:17170  LDAP: ldap://{lldap_fqdn}:3890  Base DN: {base_dn}")
     return lldap_ip
+
+def deploy_openldap(lab_spec):
+    liblog.print_logs("Instantiating deploy_openldap() function.")
+    # Prerequisites: MetalLB + Technitium (Module 3), the DNS zone (Module 4); the lab CA (Module 10) for LDAPS.
+    import os
+    from python_lib import ldap_management as libldap
+    kube_config_path = lab_spec["kubernetes"]["kube_config_path"]
+    cfg = libldap.openldap_settings(lab_spec)
+    ldap_ip, ldap_fqdn = cfg["ip"], cfg["fqdn"]
+
+    # Step 0: the old LLDAP service must not hold the same IP (MetalLB would never hand it to OpenLDAP)
+    try:
+        lldap_ip = get_load_balancer_ip(kube_config_path, "lldap", "lldap-service", 5)
+    except Exception:
+        lldap_ip = None
+    if lldap_ip == ldap_ip:
+        raise RuntimeError(f"LLDAP still holds {ldap_ip}. Remove it first (its users go with it; -m6 recreates them "
+                           "in OpenLDAP): kubectl delete namespace lldap   (the MetalLB pool for the IP is reused)")
+
+    # Step 1: Make sure MetalLB can hand out the OpenLDAP IP
+    liblog.print_logs("(Step 1) Ensure a MetalLB IPAddressPool covers "+ldap_ip+".")
+    ensure_metallb_ip_is_assignable(kube_config_path, ldap_ip, "openldap-ip-pool")
+
+    # Step 2: Namespace + secrets. Passwords follow lab_spec, but OpenLDAP only reads them at its first bootstrap.
+    liblog.print_logs("(Step 2) Create namespace, passwords and the LDAPS certificate.")
+    create_namespace(kube_config_path, "openldap")
+    std.config.load_kube_config(config_file=kube_config_path)
+    v1 = std.client.CoreV1Api()
+    try:
+        current = {k: std.base64.b64decode(v).decode() for k, v in v1.read_namespaced_secret("openldap-secrets", "openldap").data.items()}
+        config_pw = current.get("config-password")
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+        config_pw = None
+    _upsert_secret(v1, "openldap", "openldap-secrets", {
+        "admin-password": cfg["admin_password"], "readonly-password": cfg["readonly_password"],
+        "config-password": config_pw or std.secrets.token_urlsafe(24)})
+    try:
+        tls_now = {k: std.base64.b64decode(v).decode() for k, v in v1.read_namespaced_secret("openldap-tls", "openldap").data.items()}
+    except std.ApiException as e:
+        if e.status != 404:
+            raise
+        tls_now = None
+    tls = libldap.openldap_tls(lab_spec, tls_now)
+    tls_changed = _upsert_secret(v1, "openldap", "openldap-tls", tls)
+    os.makedirs(libldap.OPENLDAP_STATE_DIR, exist_ok=True)
+    with open(f"{libldap.OPENLDAP_STATE_DIR}/ldaps_ca.pem", "w") as f:
+        f.write(tls["ca.crt"])
+
+    # Step 3: Generate deploy_openldap.yaml from scripts_lib/k8_deploy_openldap_yaml.script
+    liblog.print_logs("(Step 3) Generate deploy_openldap.yaml file.")
+    node = _conjur_pick_node(kube_config_path, cfg["node"], namespace="openldap", deployment="openldap")
+    liblog.print_logs(f"    OpenLDAP pinned to node {node}; directory data in {cfg['data_path']} on that node.")
+    yaml_name = "deploy_openldap.yaml"
+    raw = libvmw.populate_var_from_file("scripts_lib/k8_deploy_openldap_yaml.script")
+    libvmw.write_script_to_script_file(raw.splitlines(), yaml_name)
+    replacements = {
+        "ID:OLDAP-001": ldap_ip,                         # metallb.universe.tf/loadBalancerIPs
+        "ID:OLDAP-002": node,                            # nodeSelector kubernetes.io/hostname
+        "ID:OLDAP-003": cfg["data_path"] + "/data",      # /var/lib/ldap
+        "ID:OLDAP-004": cfg["organisation"],             # LDAP_ORGANISATION
+        "ID:OLDAP-005": cfg["domain"],                   # LDAP_DOMAIN
+        "ID:OLDAP-006": cfg["base_dn"],                  # LDAP_BASE_DN
+        "ID:OLDAP-007": cfg["readonly_user"],            # LDAP_READONLY_USER_USERNAME
+        "ID:OLDAP-008": cfg["data_path"] + "/config",    # /etc/ldap/slapd.d
+    }
+    for placeholder, value in replacements.items():
+        libvmw.search_and_replace_in_file(placeholder, std.json.dumps(value), yaml_name)
+
+    # Step 4: Deploy
+    liblog.print_logs("(Step 4) Deploy OpenLDAP.")
+    delete_service_if_ip_mismatch(kube_config_path, "openldap", "openldap-service", ldap_ip)
+    try:
+        apply_from_yaml(kube_config_path, yaml_name, "openldap")
+    finally:
+        libvmw.delete_script_file(yaml_name)
+    if tls_changed and tls_now is not None:
+        apps = std.client.AppsV1Api()
+        apps.patch_namespaced_deployment("openldap", "openldap", {"spec": {"template": {"metadata": {
+            "annotations": {"hesiod/restarted-at": std.datetime.now().strftime("%Y%m%d%H%M%S")}}}}})
+        liblog.print_logs("    New LDAPS certificate: OpenLDAP pod restarted to pick it up.")
+    std.time.sleep(5)
+    pause_for_pods_until_running(kube_config_path, "openldap", 600)
+    wait_for_rollout(kube_config_path, "openldap", "openldap", 600)
+    service_ip = get_load_balancer_ip(kube_config_path, "openldap", "openldap-service")
+    liblog.print_logs(f"OpenLDAP service external IP: {service_ip}")
+    if service_ip != ldap_ip:
+        raise RuntimeError(f"OpenLDAP service got external IP {service_ip}, expected {ldap_ip}. "
+                           f"Check: kubectl -n openldap describe svc openldap-service")
+    libldap.wait_until_openldap_ready(cfg, 600)
+
+    # Step 5: Register in Technitium DNS
+    liblog.print_logs("(Step 5) Register "+ldap_fqdn+" in Technitium DNS.")
+    try:
+        domain_name = lab_spec["domain"]["name"]
+        dns_server_ip = lab_spec["domain"]["server_ips"][0]
+        dns_credentials = lab_spec["authentication"][lab_spec["domain"]["use_these_credentials"]]
+        technitium_token = libdns.get_technitium_token(dns_credentials["username"], dns_credentials["password"], dns_server_ip)
+        if libdns.check_zone_exists(technitium_token, dns_server_ip, domain_name):
+            libdns.createdns_record(technitium_token, dns_server_ip, ldap_fqdn, domain_name, ldap_ip)
+            liblog.print_logs("    Added A record: "+ldap_fqdn+" -> "+ldap_ip)
+        else:
+            liblog.print_logs("    Zone "+domain_name+" does not exist (run Module 4 first). Skipping DNS registration.")
+    except Exception as e:
+        liblog.print_logs(f"    DNS registration failed, OpenLDAP is still deployed: {e}")
+
+    liblog.print_logs(f"OpenLDAP deployed: ldap://{ldap_fqdn}:389  ldaps://{ldap_fqdn}:636  Base DN: {cfg['base_dn']}")
+    return ldap_ip
 
 def _conjur_pick_node(local_kube_config_path, requested_node, namespace="conjur", deployment="conjur-postgres"):
     # The Postgres data lives on a hostPath, so the pod must always land on the same node.
