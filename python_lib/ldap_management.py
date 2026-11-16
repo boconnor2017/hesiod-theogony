@@ -202,6 +202,10 @@ def openldap_settings(lab_spec):
     admin = _cred(lab_spec, o.get("use_these_credentials"), "use_these_credentials")
     ro = _cred(lab_spec, o.get("readonly_credentials"), "readonly_credentials")
     ro_name = ro.get("username") if not str(ro.get("username", "")).startswith("<") else "readonly"
+    if ro_name.lower() == "admin" or o.get("readonly_credentials") == o.get("use_these_credentials"):
+        raise OpenLdapError('lab_spec["openldap"]["readonly_credentials"] points at the admin account (cn=admin). VCF must '
+                            'bind with a separate read-only account: add an authentication entry with username "readonly" '
+                            'and its own password, and point readonly_credentials at it.')
     hostname = o.get("hostname", "openldap")
     node = o.get("node")
     return {"ip": o["ip_address"], "hostname": hostname, "fqdn": f"{hostname}.{domain}", "domain": domain,
@@ -315,6 +319,40 @@ def ensure_readonly_account(lab_spec):
     _check(conn, f"set password for {cfg['readonly_dn']}")
     conn.unbind()
     liblog.print_logs(f"    Read-only account {cfg['readonly_dn']}: password set from lab_spec.")
+    return True
+
+
+def ensure_readonly_acl(lab_spec):
+    """Give the read-only account read access to the directory (OpenLDAP olcAccess, via kubectl exec + ldapi as root).
+    osixia/openldap writes that ACL only at first bootstrap, for whatever LDAP_READONLY_USER_USERNAME was then; without
+    it the account can bind but sees nothing (searches return "No such object"). The rule goes after the userPassword
+    rule, so the account never reads password hashes."""
+    import re
+    from python_lib import k8_management as libk8
+    cfg = openldap_settings(lab_spec)
+    find = (f'ldapsearch -Q -Y EXTERNAL -H ldapi:/// -LLL -o ldif-wrap=no -b cn=config '
+            f'"(olcSuffix={cfg["base_dn"]})" dn olcAccess')
+    rc, out = libk8.exec_in_pod(cfg["kube"], "openldap", "app=openldap", "openldap", find, 60)
+    m = re.search(r"^dn: (olcDatabase=\S+,cn=config)", out, re.M)
+    if rc != 0 or not m:
+        raise OpenLdapError(f"cannot read the OpenLDAP ACLs over ldapi: {out.strip()[-300:]}")
+    db_dn = m.group(1)
+    rules = re.findall(r"^olcAccess: \{(\d+)\}(.*)$", out, re.M)
+    ro = cfg["readonly_dn"].lower()
+    for _, rule in rules:
+        r = rule.lower()
+        if r.startswith("to * ") and ro in r and re.search(re.escape(ro) + r'"?\s+(read|write|manage)', r):
+            liblog.print_logs(f"    Read-only account already has read access ({db_dn}).")
+            return False
+    pw_idx = next((int(i) for i, rule in rules if "userpassword" in rule.lower()), -1)
+    pos = pw_idx + 1
+    ldif = (f"dn: {db_dn}\nchangetype: modify\nadd: olcAccess\n"
+            f'olcAccess: {{{pos}}}to * by dn.exact="{cfg["readonly_dn"]}" read by * break\n')
+    rc, out = libk8.exec_in_pod(cfg["kube"], "openldap", "app=openldap", "openldap",
+                                f"ldapmodify -Q -Y EXTERNAL -H ldapi:/// <<'LDIF'\n{ldif}LDIF", 60)
+    if rc != 0:
+        raise OpenLdapError(f"cannot add the read ACL for {cfg['readonly_dn']}: {out.strip()[-300:]}")
+    liblog.print_logs(f"    Read access granted to {cfg['readonly_dn']} (olcAccess {{{pos}}} on {db_dn}).")
     return True
 
 

@@ -266,6 +266,7 @@ def m5(args):
         if "--checks" not in args:
             libk8.deploy_openldap(lab_spec_py)
         libldap.ensure_readonly_account(lab_spec_py)
+        libldap.ensure_readonly_acl(lab_spec_py)
         liblog.print_logs("Directory checks (VCF SSO identity source):")
         libldap.openldap_checks(lab_spec_py, include_users=False)
         libldap.write_vcf_sso_sheet(lab_spec_py)
