@@ -293,6 +293,31 @@ def wait_until_openldap_ready(cfg, timeout_s=600):
                         "Check: kubectl -n openldap logs deploy/openldap")
 
 
+def ensure_readonly_account(lab_spec):
+    """The VCF bind account must exist and take the lab_spec password. osixia/openldap only creates it (and only reads
+    its password) at the very first bootstrap, so a later lab_spec change or a skipped bootstrap leaves it unusable."""
+    import ldap3
+    cfg = openldap_settings(lab_spec)
+    probe = ldap3.Connection(ldap3.Server(cfg["ip"], port=389, connect_timeout=10), user=cfg["readonly_dn"],
+                             password=cfg["readonly_password"], raise_exceptions=False)
+    if probe.bind():
+        probe.unbind()
+        liblog.print_logs(f"    Read-only account {cfg['readonly_dn']} binds with the lab_spec password.")
+        return False
+    conn = _ldap_conn(cfg, "admin")
+    if not conn.search(cfg["readonly_dn"], "(objectClass=*)", search_scope=ldap3.BASE):
+        conn.add(cfg["readonly_dn"], ["simpleSecurityObject", "organizationalRole"],
+                 {"cn": cfg["readonly_user"], "userPassword": cfg["readonly_password"],
+                  "description": "Read-only bind account for VCF SSO (Theogony -m5)"})
+        _check(conn, f"add {cfg['readonly_dn']}")
+        liblog.print_logs(f"    Created the read-only account {cfg['readonly_dn']}.")
+    conn.extend.standard.modify_password(cfg["readonly_dn"], new_password=cfg["readonly_password"])
+    _check(conn, f"set password for {cfg['readonly_dn']}")
+    conn.unbind()
+    liblog.print_logs(f"    Read-only account {cfg['readonly_dn']}: password set from lab_spec.")
+    return True
+
+
 def _ensure_ou(conn, dn):
     import ldap3
     if conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE):
