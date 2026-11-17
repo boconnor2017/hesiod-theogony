@@ -23,6 +23,7 @@ from python_lib import conjur as libconjur
 from python_lib import ca as libca
 from python_lib import backup as libbackup
 from python_lib import kms as libkms
+from python_lib import scg as libscg
 
 # Local Functions
 def _main_(args):
@@ -85,6 +86,10 @@ def _main_(args):
         m12(args)
         std.sys.exit()
 
+    if '-m13' in args:
+        m13(args)
+        std.sys.exit()
+
     else:
         help_menu()
         std.sys.exit()
@@ -132,6 +137,9 @@ def help_menu():
     print("         --in-transit-only    vSAN data-in-transit encryption only (no reformat)")
     print("         --backup-keys        copy the key database to conf/kmip/ and the SFTP backup target")
     print("         --report             evidence report: KMS tests, key provider status, vSAN encryption, key backup")
+    print("    -m13: (Module 13) Audit the management domain against the VCF 9.1 SCG (Broadcom's PowerCLI scripts, read-only).")
+    print("         --setup              install PowerShell + VCF.PowerCLI on this appliance and fetch the SCG")
+    print("         --report             rebuild the report from the last audit (after editing json_lib/scg_exceptions.json)")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -481,6 +489,29 @@ def m12(args):
     finally:
         print("=========================================================")
         print("Module 12 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m13(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 13")
+    print("=========================================================")
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--setup" in args:
+            libscg.setup_tools(lab_spec_py)
+            return
+        if "--report" not in args:
+            libscg.run_audit(lab_spec_py)
+        report = libscg.report(lab_spec_py)
+        if report["result"] != "PASS":
+            std.sys.exit(1)
+    except (libscg.ScgError, libvcf.VcfError) as e:
+        liblog.print_logs("Module 13 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 13 runtime is completed.")
         print("=========================================================")
         print("")
 

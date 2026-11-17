@@ -1,0 +1,62 @@
+{
+    "_readme": "Accepted SCG exceptions and manual attestations for -m13 (US-014). Each entry: control (SCG ID, wildcards allowed), objects (inventory names, wildcards; default all), type ('exception' = accepted deviation, 'attested' = a control the scripts cannot assess, verified by hand), justification (required), approved_by (the architect; entries without it are reported as not approved), expires (YYYY-MM-DD, optional), reference (story/ticket, optional). Copy this file to conf/ if you keep lab-specific approvals out of git, and point lab_spec scg.exceptions_file at it.",
+    "entries": [
+        {
+            "control": "esx-9.hardware-tpm",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "Nested ESX hosts (US-007) run as VMs on esx02 without a vTPM; TPM 2.0 cannot be provided to them.",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.tpm-configuration",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "TPM-based configuration encryption needs a TPM (see esx-9.hardware-tpm).",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.tpm-recovery-key-backup",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "No TPM-based configuration encryption, so there is no recovery key to back up (see esx-9.hardware-tpm).",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.hardware-secureboot",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "Nested ESX hosts boot from a remastered kickstart ISO (US-007); UEFI Secure Boot is not enabled on the nested VMs.",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.secureboot-enforcement",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "Depends on UEFI Secure Boot (see esx-9.hardware-secureboot).",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.hardware-management-log-forwarding",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "Nested ESX hosts have no hardware management controller (BMC/iDRAC).",
+            "approved_by": "<architect>",
+            "reference": "US-007"
+        },
+        {
+            "control": "esx-9.ssh",
+            "objects": ["*"],
+            "type": "exception",
+            "justification": "Temporary: Theogony -m7 --dns-ntp persists host configuration over SSH (auto-backup.sh). SSH is disabled in the final hardening pass of US-014.",
+            "approved_by": "<architect>",
+            "expires": "2026-12-31",
+            "reference": "US-014"
+        }
+    ]
+}

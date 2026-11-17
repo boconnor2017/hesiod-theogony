@@ -207,6 +207,12 @@
         "data_path" : "/var/lib/hesiod/sftp"
     },
 
+    "scg" : {
+        "version" : "910-20260612-01",
+        "exceptions_file" : "json_lib/scg_exceptions.json",
+        "components" : ["esx-9", "vcenter-9", "vm-9", "vsan-9", "nsx-9", "sddc-9"]
+    },
+
     "key_management" : {
         "hostname" : "<sample: kmip>",
         "ip_address" : "<sample: 10.0.1.3>",
