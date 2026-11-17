@@ -4,7 +4,7 @@
 #              exceptions and manual attestations, and writes the evidence for US-014.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0 (audit only; remediation follows once the failure list and exceptions are agreed)
+# Version: 1.1 (audit only; SSO admin connection over validated TLS via the lab root CA)
 #
 # -m13 --setup     install PowerShell + VCF.PowerCLI + VMware.vSphere.SsoAdmin on this appliance, fetch the SCG
 # -m13             audit vCenter, every ESX host and every VM (read-only), then the report
@@ -105,9 +105,26 @@ Set-PowerCLIConfiguration -Scope AllUsers -ParticipateInCEIP $false -Confirm:$fa
         if line.startswith(("present", "installed")):
             liblog.print_logs("    " + line)
 
+    trust_lab_root()
     fetch_scg(cfg)
     liblog.print_logs("Setup complete.")
     return pwsh
+
+
+def trust_lab_root():
+    """Add the lab root CA (Module 10) to this appliance's trust store, so PowerCLI's SSO admin connection can validate
+    vCenter's certificate (its -SkipCertificateCheck does not work on Linux)."""
+    src, dst = "conf/ca/root_ca.crt", "/usr/local/share/ca-certificates/hesiod-lab-root-ca.crt"
+    if not os.path.exists(src):
+        liblog.print_logs("(Setup) WARNING: conf/ca/root_ca.crt missing (Module 10); SSO policy checks may not run.")
+        return False
+    if os.path.exists(dst) and open(dst).read() == open(src).read():
+        liblog.print_logs("(Setup) Lab root CA already trusted by this appliance.")
+        return False
+    shutil.copy(src, dst)
+    _run(["update-ca-certificates"], 120)
+    liblog.print_logs(f"(Setup) Lab root CA added to this appliance's trust store ({dst}).")
+    return True
 
 
 def fetch_scg(cfg):
@@ -150,7 +167,12 @@ $sec = ConvertTo-SecureString $env:HESIOD_VC_PASSWORD -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($env:HESIOD_VC_USER, $sec)
 Connect-VIServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null
 try { Connect-CisServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null } catch { Write-Output "HESIOD-WARN CIS: $_" }
-try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -SkipCertificateCheck -ErrorAction Stop | Out-Null } catch { Write-Output "HESIOD-WARN SSO: $_" }
+# SsoAdmin's -SkipCertificateCheck is broken on Linux (missing AcceptAllX509CertificateValidator type), so connect with
+# normal TLS validation: -m13 --setup puts the lab root CA (Module 10) in this appliance's trust store.
+$sso = $false
+try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO (validated TLS): $_" }
+if (-not $sso) { try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -SkipCertificateCheck -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO: $_" } }
+Write-Output "HESIOD-SSO connected=$sso"
 function Safe([string]$n) { $bad = [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars()); return ($n -replace "[$bad]", '_') }
 $vms = Get-VM | Sort-Object Name
 $hosts = Get-VMHost | Sort-Object Name
@@ -192,6 +214,9 @@ def run_audit(lab_spec):
     p = _run([pwsh, "-NoProfile", "-NonInteractive", "-File", driver, "-Tools", tools, "-Out", out], 7200, env, check=False)
     with open(f"{out}/driver.log", "w") as f:
         f.write(p.stdout + "\n" + p.stderr)
+    if "HESIOD-SSO connected=False" in p.stdout:
+        liblog.print_logs("    WARNING: no SSO admin connection: vCenter SSO password/lockout controls will show as FAIL "
+                          "because they could not be read. Run -m13 --setup (trusts the lab root CA), then -m13 again.")
     for line in p.stdout.splitlines():
         if line.startswith("HESIOD-"):
             liblog.print_logs("    " + line.replace("HESIOD-", ""))
