@@ -4,10 +4,10 @@
 #              exceptions and manual attestations, and writes the evidence for US-014.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.5 (appliance_vms in scg.json; SSO admin on PowerCLI 9 via SsoAdmin's own dependencies; Theogony fixes for
-#              settings the scripts can't create)
+# Version: 1.6 (vCenter SSO policy read/set in vCenter's own directory (vmdir) over LDAPS instead of SsoAdmin;
+#              appliance_vms; Theogony fixes for settings the scripts can't create)
 #
-# -m13 --setup     install PowerShell + VCF.PowerCLI + VMware.vSphere.SsoAdmin on this appliance, fetch the SCG
+# -m13 --setup     install PowerShell + VCF.PowerCLI on this appliance, fetch the SCG
 # -m13             audit vCenter, every ESX host and every VM (read-only), then the report
 # -m13 --report    rebuild the report from the last audit (e.g. after editing json_lib/scg.json)
 # -m13 --remediate [--defcon N] [--dry-run] [--controls a,b]
@@ -34,14 +34,11 @@ import csv
 import datetime
 import fnmatch
 import glob
-import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
-import zipfile
 
 SCG_REPO = "https://github.com/vmware/vcf-security-and-compliance-guidelines"
 SCG_PATH = "security-configuration-hardening-guide/cloud-foundation/9.1"
@@ -49,25 +46,6 @@ STATE_DIR = "conf/scg"
 PWSH_VERSION = "7.6.10"
 PWSH_DIR = "/opt/microsoft/powershell/7"
 
-# VMware.vSphere.SsoAdmin 1.4.0 is built against PowerCLI 12's VMware.VimAutomation.Common and loads these from it.
-# VCF.PowerCLI 9 no longer ships them, so Connect-SsoAdminServer fails with "Could not load file or assembly
-# 'VMware.System.Private.ServiceModel, Version=4.4.4.0'". --setup fetches the exact packages from the SsoAdmin source
-# tree (pinned commit, SHA-256 checked) and the PowerShell driver resolves them from SSO_DEPS_DIR.
-SSO_DEPS_DIR = f"{STATE_DIR}/ssoadmin-deps"
-SSO_DEPS_URL = ("https://raw.githubusercontent.com/vmware/PowerCLI-Example-Scripts/097172029b710036232f3937dd7c04bbb6a760ad/"
-                "Modules/VMware.vSphere.SsoAdmin/src/VMware.vSphere.SsoAdmin.Client/packages/")
-SSO_DEPS = [  # (package, sha256, dll inside the package)
-    ("VMware.System.Private.ServiceModel.4.4.4.nupkg", "d6bc8f12f94ee6ae6c4a52697b6a344f72762ae4ab9e5e262c2a722b3e9b8ff9",
-     "lib/netcoreapp2.0/VMware.System.Private.ServiceModel.dll"),
-    ("VMware.Binding.Sts.12.0.0.15939652.nupkg", "e3305b573fb847344c18fbab9518d8f9a887421e091899d1a3d7c0f004c94e79",
-     "lib/netcoreapp2.0/VMware.Binding.Sts.dll"),
-    ("VMware.Binding.WsTrust.12.0.0.15939652.nupkg", "78c727f3d2753146578406aff3a4febcd7868584484ebf3e8c26c679d107ab58",
-     "lib/netcoreapp2.0/VMware.Binding.WsTrust.dll"),
-    ("VMware.Http.Handlers.12.0.0.15939652.nupkg", "12de27357b127b2b362b44404044d1085e3ccd4726ebbd7a9a7f912ae98078a0",
-     "lib/netstandard2.0/VMware.Http.Handlers.dll"),
-    ("VMware.Util.Sspi.12.0.0.15939652.nupkg", "d716f489652074a9876e5c854f7bd331d241aff818c5afaad3bf7a4731e84055",
-     "lib/netstandard2.0/VMware.Util.Sspi.dll"),
-]
 
 
 class ScgError(Exception):
@@ -96,7 +74,7 @@ def scg_settings(lab_spec):
             "controls": s.get("controls", {}), "exceptions": s.get("exceptions", []),
             "remediate_vms": [v for v in s.get("remediate_vms", []) if not str(v).startswith("<")],
             "appliance_vms": [v for v in s.get("appliance_vms", []) if not str(v).startswith("<")],
-            "vcenter": plan["vcenter"]["fqdns"]["vcenter"]["fqdn"],
+            "vcenter": plan["vcenter"]["fqdns"]["vcenter"]["fqdn"], "user": "administrator@vsphere.local",
             "password": lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]}
 
 
@@ -114,7 +92,7 @@ def _pwsh():
 
 
 def setup_tools(lab_spec):
-    """PowerShell (GitHub release tarball), VCF.PowerCLI >= 9.0, VMware.vSphere.SsoAdmin >= 1.4, and the SCG itself."""
+    """PowerShell (GitHub release tarball), VCF.PowerCLI >= 9.0, python ldap3 (vCenter SSO policy), and the SCG itself."""
     cfg = scg_settings(lab_spec)
     pwsh = _pwsh()
     if not pwsh:
@@ -139,7 +117,7 @@ def setup_tools(lab_spec):
     script = r'''
 $ErrorActionPreference = "Stop"
 Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-foreach ($m in @(@{n="VCF.PowerCLI"; v="9.0.0"}, @{n="VMware.vSphere.SsoAdmin"; v="1.4.0"})) {
+foreach ($m in @(@{n="VCF.PowerCLI"; v="9.0.0"})) {
   $have = Get-Module -ListAvailable -Name $m.n | Where-Object { $_.Version -ge [version]$m.v } | Select-Object -First 1
   if ($have) { Write-Output "present $($m.n) $($have.Version)" }
   else { Install-Module -Name $m.n -MinimumVersion $m.v -Scope AllUsers -Force -AllowClobber; Write-Output "installed $($m.n)" }
@@ -151,42 +129,22 @@ Set-PowerCLIConfiguration -Scope AllUsers -ParticipateInCEIP $false -Confirm:$fa
         if line.startswith(("present", "installed")):
             liblog.print_logs("    " + line)
 
-    sso_dependencies()
+    try:
+        import ldap3  # noqa: F401  (installed with Module 5's OpenLDAP tooling)
+        liblog.print_logs("(Setup 2b) python ldap3 present (vCenter SSO policy over LDAPS).")
+    except ImportError:
+        raise ScgError("python ldap3 is missing: sudo pip install --break-system-packages ldap3")
     trust_lab_root()
     fetch_scg(cfg)
     liblog.print_logs("Setup complete.")
     return pwsh
 
 
-def sso_dependencies(quiet=False):
-    """The five .NET assemblies SsoAdmin 1.4.0 needs that VCF.PowerCLI 9 does not ship (see SSO_DEPS)."""
-    want = [os.path.join(SSO_DEPS_DIR, os.path.basename(inner)) for _, _, inner in SSO_DEPS]
-    if all(os.path.exists(f) for f in want):
-        if not quiet:
-            liblog.print_logs(f"(Setup 2b) SsoAdmin dependencies present ({SSO_DEPS_DIR}).")
-        return True
-    liblog.print_logs("(Setup 2b) Fetching SsoAdmin's .NET dependencies (VMware.System.Private.ServiceModel 4.4.4, "
-                      "VMware.Binding.Sts/WsTrust 12.0) from the SsoAdmin source tree.")
-    os.makedirs(SSO_DEPS_DIR, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        for pkg, sha, inner in SSO_DEPS:
-            path = os.path.join(tmp, pkg)
-            _run(["curl", "-sSLf", "-o", path, SSO_DEPS_URL + pkg], 300)
-            got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-            if got != sha:
-                raise ScgError(f"{pkg}: SHA-256 mismatch ({got}); not using it")
-            with zipfile.ZipFile(path) as z, open(os.path.join(SSO_DEPS_DIR, os.path.basename(inner)), "wb") as f:
-                f.write(z.read(inner))
-    liblog.print_logs(f"    {len(SSO_DEPS)} assemblies in {SSO_DEPS_DIR} (SHA-256 verified).")
-    return True
-
-
 def trust_lab_root():
-    """Add the lab root CA (Module 10) to this appliance's trust store, so PowerCLI's SSO admin connection can validate
-    vCenter's certificate (its -SkipCertificateCheck does not work on Linux)."""
+    """Add the lab root CA (Module 10) to this appliance's trust store, so tools here validate the lab certificates."""
     src, dst = "conf/ca/root_ca.crt", "/usr/local/share/ca-certificates/hesiod-lab-root-ca.crt"
     if not os.path.exists(src):
-        liblog.print_logs("(Setup) WARNING: conf/ca/root_ca.crt missing (Module 10); SSO policy checks may not run.")
+        liblog.print_logs("(Setup) WARNING: conf/ca/root_ca.crt missing (Module 10); lab certificates are not trusted here.")
         return False
     if os.path.exists(dst) and open(dst).read() == open(src).read():
         liblog.print_logs("(Setup) Lab root CA already trusted by this appliance.")
@@ -231,39 +189,13 @@ CONNECT = r'''
 param([string]$Tools, [string]$Out, [string]$Jobs)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
-# SsoAdmin 1.4.0 needs VMware.System.Private.ServiceModel 4.4.4 and VMware.Binding.Sts/WsTrust 12.0, which VCF.PowerCLI 9
-# no longer ships. Resolve them from the copies -m13 --setup put in conf/scg/ssoadmin-deps (only when .NET can't find them).
-$deps = $env:HESIOD_SSO_DEPS
-if ($deps -and (Test-Path $deps)) {
-  try {
-    Add-Type -TypeDefinition @"
-using System; using System.IO; using System.Reflection;
-public static class HesiodSsoResolver {
-  static string dir;
-  public static void Register(string d) { dir = d; AppDomain.CurrentDomain.AssemblyResolve += Resolve; }
-  static Assembly Resolve(object s, ResolveEventArgs e) {
-    var f = Path.Combine(dir, new AssemblyName(e.Name).Name + ".dll");
-    if (!File.Exists(f)) return null;
-    foreach (var a in AppDomain.CurrentDomain.GetAssemblies()) { try { if (a.Location == f) return a; } catch {} }
-    return Assembly.LoadFrom(f);
-  }
-}
-"@
-    [HesiodSsoResolver]::Register($deps)
-  } catch { Write-Output "HESIOD-WARN SsoAdmin dependency resolver: $_" }
-} else { Write-Output "HESIOD-WARN SsoAdmin dependencies missing ($deps): run -m13 --setup" }
-try { Import-Module VMware.vSphere.SsoAdmin -ErrorAction Stop } catch { Write-Output "HESIOD-WARN SsoAdmin import: $_" }
+# The vCenter SSO policy controls are read and set by Theogony itself (vCenter's directory over LDAPS, see scg.py),
+# so SsoAdmin is not used; Broadcom's SSO checks log an ERROR without a control and are ignored.
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCEIP $false -Confirm:$false | Out-Null
 $sec = ConvertTo-SecureString $env:HESIOD_VC_PASSWORD -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($env:HESIOD_VC_USER, $sec)
 Connect-VIServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null
 try { Connect-CisServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null } catch { Write-Output "HESIOD-WARN CIS: $_" }
-# Normal TLS validation first (-m13 --setup puts the lab root CA from Module 10 in this appliance's trust store),
-# then -SkipCertificateCheck.
-$sso = $false
-try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO (validated TLS): $_" }
-if (-not $sso) { try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -SkipCertificateCheck -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO: $_" } }
-Write-Output "HESIOD-SSO connected=$sso"
 function Safe([string]$n) { $bad = [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars()); return ($n -replace "[$bad]", '_') }
 '''
 
@@ -308,15 +240,9 @@ Write-Output "HESIOD-DONE"
 '''
 
 
-def _sso_warning(stdout):
-    if "HESIOD-SSO connected=False" in stdout:
-        liblog.print_logs("    WARNING: no SSO admin connection: the vCenter SSO password/lockout controls cannot be read "
-                          "(they report FAIL) or changed. See the SSO lines below.")
-
-
 def _env(cfg):
-    return {**os.environ, "HESIOD_VC": cfg["vcenter"], "HESIOD_VC_USER": "administrator@vsphere.local",
-            "HESIOD_VC_PASSWORD": cfg["password"], "HESIOD_SSO_DEPS": os.path.abspath(SSO_DEPS_DIR)}
+    return {**os.environ, "HESIOD_VC": cfg["vcenter"], "HESIOD_VC_USER": cfg["user"],
+            "HESIOD_VC_PASSWORD": cfg["password"]}
 
 
 def run_audit(lab_spec):
@@ -325,10 +251,6 @@ def run_audit(lab_spec):
     if not pwsh:
         raise ScgError("PowerShell is not installed: run -m13 --setup")
     tools = os.path.abspath(f"{_scg_base()}/tools")
-    try:
-        sso_dependencies(quiet=True)
-    except Exception as e:  # the audit still runs; only the SSO controls need these
-        liblog.print_logs(f"    WARNING: SsoAdmin dependencies not available ({e}); SSO controls will report FAIL.")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = os.path.abspath(f"{STATE_DIR}/runs/{stamp}")
     os.makedirs(out)
@@ -340,12 +262,12 @@ def run_audit(lab_spec):
     p = _run([pwsh, "-NoProfile", "-NonInteractive", "-File", driver, "-Tools", tools, "-Out", out], 7200, _env(cfg), check=False)
     with open(f"{out}/driver.log", "w") as f:
         f.write(p.stdout + "\n" + p.stderr)
-    _sso_warning(p.stdout)
     for line in p.stdout.splitlines():
         if line.startswith("HESIOD-"):
             liblog.print_logs("    " + line.replace("HESIOD-", ""))
     if "HESIOD-DONE" not in p.stdout:
         raise ScgError(f"the audit did not finish (rc={p.returncode}); see {out}/driver.log: {(p.stderr or p.stdout).strip()[-400:]}")
+    sso_audit(cfg, out)
     with open(f"{STATE_DIR}/latest", "w") as f:
         f.write(out)
     if previous:
@@ -353,6 +275,129 @@ def run_audit(lab_spec):
             f.write(previous)
     liblog.print_logs(f"    Raw results: {out}")
     return out
+
+
+# ---------------------------------------------------------------- vCenter SSO policy (vmdir)
+# The vsphere.local password and lockout policy lives in vCenter's own directory (VMware Directory Service), entry
+# "cn=password and lockout policy,dc=vsphere,dc=local": the same values the vSphere Client edits under Single Sign On >
+# Configuration. Theogony reads and sets them there over LDAPS as administrator@vsphere.local, with Broadcom's thresholds
+# (audit-vcenter-9.ps1), instead of through the SsoAdmin PowerShell module (unsupported, fails on PowerShell 7.6).
+
+SSO_CHECKS = [  # (Broadcom name, vmdir attribute, comparator, expected, control)
+    ("AutoUnlockIntervalSec", "vmwPasswordChangeAutoUnlockIntervalSec", "ge-or-zero", 300, "vcenter-9.account-lockout-duration"),
+    ("FailedAttemptIntervalSec", "vmwPasswordChangeFailedAttemptIntervalSec", "ge", 900, "vcenter-9.account-lockout-reset"),
+    ("MaxFailedAttempts", "vmwPasswordChangeMaxFailedAttempts", "le-nonzero", 5, "vcenter-9.account-lockout-max-attempts"),
+    ("PasswordLifetimeDays", "vmwPasswordLifetimeDays", "eq", 9999, "vcenter-9.password-max-age"),
+    ("ProhibitedPreviousPasswordsCount", "vmwPasswordProhibitedPreviousCount", "ge", 5, "vcenter-9.password-history"),
+    ("MinLength", "vmwPasswordMinLength", "ge", 15, "vcenter-9.password-complexity"),
+    ("MaxLength", "vmwPasswordMaxLength", "ge", 64, "vcenter-9.password-complexity"),
+    ("MinNumericCount", "vmwPasswordMinNumericCount", "ge", 1, "vcenter-9.password-complexity"),
+    ("MinSpecialCharCount", "vmwPasswordMinSpecialCharCount", "ge", 1, "vcenter-9.password-complexity"),
+    ("MinAlphabeticCount", "vmwPasswordMinAlphabeticCount", "ge", 2, "vcenter-9.password-complexity"),
+    ("MaxIdenticalAdjacentCharacters", "vmwPasswordMaxIdenticalAdjacentChars", "le-nonzero", 3, "vcenter-9.password-complexity"),
+    ("MinUppercaseCount", "vmwPasswordMinUpperCaseCount", "ge", 1, "vcenter-9.password-complexity"),
+    ("MinLowercaseCount", "vmwPasswordMinLowerCaseCount", "ge", 1, "vcenter-9.password-complexity"),
+]
+SSO_CONTROLS = sorted({c[4] for c in SSO_CHECKS})
+
+
+def _sso_dn(user):
+    """administrator@vsphere.local -> (cn=administrator,cn=Users,dc=vsphere,dc=local, dc=vsphere,dc=local)"""
+    name, domain = user.split("@", 1)
+    base = ",".join(f"dc={d}" for d in domain.split("."))
+    return f"cn={name},cn=Users,{base}", base
+
+
+def _sso_connect(cfg):
+    """LDAPS to vCenter's directory. Validated against the lab CA chain (Module 10) first; vmdir may present a VMCA
+    certificate, so it falls back to an unverified TLS session (as Theogony's pyVmomi connections do)."""
+    import ldap3
+    import ssl
+    bind_dn, base = _sso_dn(cfg["user"])
+    attempts = []
+    if os.path.exists("conf/ca/ca_chain.pem"):
+        attempts.append(("verified", ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_file="conf/ca/ca_chain.pem")))
+    attempts.append(("not verified", ldap3.Tls(validate=ssl.CERT_NONE)))
+    last = None
+    for label, tls in attempts:
+        try:
+            server = ldap3.Server(cfg["vcenter"], port=636, use_ssl=True, tls=tls, connect_timeout=20, get_info=ldap3.NONE)
+            conn = ldap3.Connection(server, user=bind_dn, password=cfg["password"], auto_bind=True, receive_timeout=60)
+            return conn, base, label
+        except ldap3.core.exceptions.LDAPBindError as e:
+            raise ScgError(f"vCenter directory rejected {cfg['user']}: {e}")
+        except Exception as e:
+            last = e
+    raise ScgError(f"cannot reach vCenter's directory on {cfg['vcenter']}:636: {last}")
+
+
+def _sso_policy(conn, base):
+    dn = f"cn=password and lockout policy,{base}"
+    conn.search(dn, "(objectClass=*)", search_scope="BASE", attributes=[c[1] for c in SSO_CHECKS])
+    if not conn.entries:
+        raise ScgError(f"{dn} not found in vCenter's directory")
+    attrs = conn.entries[0].entry_attributes_as_dict
+    values = {}
+    for _, attr, *_ in SSO_CHECKS:
+        v = attrs.get(attr) or [None]
+        try:
+            values[attr] = int(v[0])
+        except (TypeError, ValueError):
+            values[attr] = None
+    return dn, values
+
+
+def _sso_pass(comparator, actual, expected):
+    if actual is None:
+        return False
+    return {"eq": actual == expected, "ge": actual >= expected, "le": actual <= expected,
+            "le-nonzero": 0 < actual <= expected, "ge-or-zero": actual == 0 or actual >= expected}[comparator]
+
+
+def sso_audit(cfg, run_dir):
+    """Writes <run>/sso.json; evaluate() puts these results in place of Broadcom's SSO checks."""
+    result = {"ok": False, "rows": []}
+    try:
+        conn, base, tls = _sso_connect(cfg)
+        try:
+            _, values = _sso_policy(conn, base)
+        finally:
+            conn.unbind()
+        for name, attr, comp, exp, control in SSO_CHECKS:
+            ok = _sso_pass(comp, values[attr], exp)
+            result["rows"].append({"kind": "vcenter", "object": cfg["vcenter"], "control": control,
+                                   "level": "PASS" if ok else "FAIL",
+                                   "text": f"SSO {name} {'configured correctly' if ok else 'not configured correctly'} "
+                                           f"({attr}, expected {comp} {exp})", "value": str(values[attr])})
+        result.update(ok=True, tls=tls)
+        fails = sum(r["level"] == "FAIL" for r in result["rows"])
+        liblog.print_logs(f"    SSO policy (vCenter directory, LDAPS {tls}): {len(result['rows']) - fails} PASS, {fails} FAIL")
+    except Exception as e:
+        result["error"] = str(e)
+        liblog.print_logs(f"    WARNING: vCenter SSO policy not read ({e}); the SSO controls are not assessed in this run.")
+    with open(f"{run_dir}/sso.json", "w") as f:
+        json.dump(result, f, indent=2)
+    return result
+
+
+def _sso_fix(lab_spec, control):
+    """Sets the failing values of one SSO control to Broadcom's targets, then reads them back."""
+    import ldap3
+    cfg = scg_settings(lab_spec)
+    conn, base, tls = _sso_connect(cfg)
+    try:
+        dn, values = _sso_policy(conn, base)
+        changes = {attr: exp for name, attr, comp, exp, c in SSO_CHECKS if c == control and not _sso_pass(comp, values[attr], exp)}
+        if not changes:
+            liblog.print_logs(f"    {control}: already compliant.")
+            return
+        if not conn.modify(dn, {a: [(ldap3.MODIFY_REPLACE, [str(v)])] for a, v in changes.items()}):
+            raise ScgError(f"modify refused: {conn.result.get('description')} {conn.result.get('message', '')}".strip())
+        _, after = _sso_policy(conn, base)
+        for a, v in changes.items():
+            liblog.print_logs(f"    {control}: {a} {values[a]} -> {after[a]}" + ("" if after[a] == v else f" (wanted {v})"))
+    finally:
+        conn.unbind()
 
 
 # ---------------------------------------------------------------- results
@@ -415,6 +460,9 @@ def evaluate(lab_spec, run_dir=None):
     if not run_dir or not os.path.isdir(run_dir):
         raise ScgError("no audit run found: run -m13 first")
     rows, appliances = parse_run(run_dir)
+    sso = json.load(open(f"{run_dir}/sso.json")) if os.path.exists(f"{run_dir}/sso.json") else {}
+    if sso.get("ok"):
+        rows = [r for r in rows if r["control"] not in SSO_CONTROLS] + sso["rows"]
     # VCF appliances Broadcom's check misses (it only looks for "VMware" in the VM notes): scg.json appliance_vms.
     # Same treatment as the ones it finds: one APPLIANCE result per VM, never remediated.
     listed = sorted({r["object"] for r in rows if r["kind"] == "vm"
@@ -720,6 +768,8 @@ PYTHON_FIXES = {
     "vcenter-9.vpxuser-length": _vpxuser_length,
     "esx-9.memory-tiering-encryption": _esx_memory_tiering_encryption,
 }
+for _c in SSO_CONTROLS:
+    PYTHON_FIXES[_c] = (lambda control: lambda lab_spec, si: _sso_fix(lab_spec, control))(_c)
 
 
 def _python_fixes(lab_spec, controls):
@@ -780,9 +830,8 @@ def remediate(lab_spec, defcon=None, dry_run=False, only=None):
                   "-Jobs", f"{out}/jobs.json"], 14400, _env(cfg), check=False)
         with open(f"{out}/driver.log", "w") as f:
             f.write(p.stdout + "\n" + p.stderr)
-        _sso_warning(p.stdout)
         for line in p.stdout.splitlines():
-            if line.startswith(("HESIOD-ERROR", "HESIOD-WARN", "HESIOD-SSO")):
+            if line.startswith(("HESIOD-ERROR", "HESIOD-WARN")):
                 liblog.print_logs("    " + line.replace("HESIOD-", ""))
         for path in glob.glob(f"{out}/*.csv"):
             obj = os.path.basename(path)[:-4].split("__", 1)[1]
