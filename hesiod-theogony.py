@@ -139,7 +139,10 @@ def help_menu():
     print("         --report             evidence report: KMS tests, key provider status, vSAN encryption, key backup")
     print("    -m13: (Module 13) Audit the management domain against the VCF 9.1 SCG (Broadcom's PowerCLI scripts, read-only).")
     print("         --setup              install PowerShell + VCF.PowerCLI on this appliance and fetch the SCG")
-    print("         --report             rebuild the report from the last audit (after editing json_lib/scg_exceptions.json)")
+    print("         --report             rebuild the report from the last audit (after editing json_lib/scg.json)")
+    print("         --remediate          fix failing controls at the DEFCON level in json_lib/scg.json (default 5 = safest),")
+    print("                              then audit again. --defcon N overrides the level for one run (1 = everything),")
+    print("                              --dry-run only lists the plan, --controls a,b narrows it.")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -500,6 +503,19 @@ def m13(args):
     try:
         if "--setup" in args:
             libscg.setup_tools(lab_spec_py)
+            return
+        if "--remediate" in args:
+            defcon = None    # default: "defcon" in json_lib/scg.json
+            if "--defcon" in args:
+                try:
+                    defcon = int(args[args.index("--defcon") + 1])
+                except (IndexError, ValueError):
+                    liblog.print_logs("Module 13: --defcon needs a level, 1-5 (5 = safest controls only, 1 = everything).")
+                    std.sys.exit(1)
+            only = args[args.index("--controls") + 1].split(",") if "--controls" in args else None
+            report = libscg.remediate(lab_spec_py, defcon, dry_run=("--dry-run" in args), only=only)
+            if "--dry-run" not in args and isinstance(report, dict) and report.get("result") != "PASS":
+                std.sys.exit(1)
             return
         if "--report" not in args:
             libscg.run_audit(lab_spec_py)

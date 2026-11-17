@@ -46,7 +46,7 @@ for s in $(echo "$DNS" | tr ',' ' '); do run esxcli network ip dns server add --
 [ -n "$NTP" ] && run esxcli system ntp set --server="$NTP" --enabled=true
 run vim-cmd hostsvc/enable_ssh
 run vim-cmd hostsvc/start_ssh
-run esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1
+# (no SuppressShellWarning: SCG esx-9.shell-warning wants the shell/SSH warning shown)
 
 # 4. Switching: jumbo frames, VM Network VLAN tag (nested NICs sit on a VLAN 4095 trunk)
 [ -n "$MTU" ] && run esxcli network vswitch standard set -v vSwitch0 -m "$MTU"

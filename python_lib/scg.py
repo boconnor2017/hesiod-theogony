@@ -4,15 +4,20 @@
 #              exceptions and manual attestations, and writes the evidence for US-014.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (audit only; SSO admin connection over validated TLS via the lab root CA)
+# Version: 1.3 (one config file: json_lib/scg.json, default DEFCON 5)
 #
 # -m13 --setup     install PowerShell + VCF.PowerCLI + VMware.vSphere.SsoAdmin on this appliance, fetch the SCG
 # -m13             audit vCenter, every ESX host and every VM (read-only), then the report
-# -m13 --report    rebuild the report from the last audit (e.g. after editing json_lib/scg_exceptions.json)
+# -m13 --report    rebuild the report from the last audit (e.g. after editing json_lib/scg.json)
+# -m13 --remediate [--defcon N] [--dry-run] [--controls a,b]
+#                  fix the failing controls graded DEFCON N or safer (default: "defcon" in json_lib/scg.json, 5 = safest
+#                  only, 1 = everything), with Broadcom's remediation scripts limited to those controls, then audit again.
+#                  VMs are only touched when listed in scg.json remediate_vms (VCF appliances never).
+# Configuration: json_lib/scg.json (SCG version, default DEFCON, control grades, exceptions/attestations).
 #
 # Results per control and object:
 #   PASS        the script's check passed
-#   EXCEPTED    FAIL/WARNING covered by an entry in json_lib/scg_exceptions.json (with justification)
+#   EXCEPTED    FAIL/WARNING covered by an entry in json_lib/scg.json (with justification)
 #   ATTESTED    a control the scripts cannot assess, recorded as manually verified in the same file
 #   APPLIANCE   VCF/VMware appliance VMs: Broadcom's support policy does not permit changing them; the script skips them
 #   FAIL        needs remediation (or an exception)
@@ -44,12 +49,27 @@ class ScgError(Exception):
     pass
 
 
+CONFIG_FILE = "json_lib/scg.json"
+
+
 def scg_settings(lab_spec):
-    s = lab_spec.get("scg") or {}
+    """json_lib/scg.json (static config: SCG version, default DEFCON, control grades, exceptions) + vCenter from lab_spec.
+    lab_spec["scg"]["config_file"] can point at another copy (e.g. one in conf/ with lab-specific approvals)."""
+    path = (lab_spec.get("scg") or {}).get("config_file", CONFIG_FILE)
+    try:
+        s = json.load(open(path))
+    except FileNotFoundError:
+        raise ScgError(f"{path} not found (the SCG configuration for -m13)")
+    except ValueError as e:
+        raise ScgError(f"{path} is not valid JSON: {e}")
+    defcon = int(s.get("defcon", 5))
+    if defcon not in (1, 2, 3, 4, 5):
+        raise ScgError(f"{path}: defcon must be 1-5")
     plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
-    return {"version": s.get("version", "910-20260612-01"),
-            "exceptions_file": s.get("exceptions_file", "json_lib/scg_exceptions.json"),
+    return {"config_file": path, "version": s.get("scg_version", "910-20260612-01"), "defcon": defcon,
             "components": [c.lower() for c in s.get("components", ["esx-9", "vcenter-9", "vm-9", "vsan-9", "nsx-9", "sddc-9"])],
+            "controls": s.get("controls", {}), "exceptions": s.get("exceptions", []),
+            "remediate_vms": [v for v in s.get("remediate_vms", []) if not str(v).startswith("<")],
             "vcenter": plan["vcenter"]["fqdns"]["vcenter"]["fqdn"],
             "password": lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]}
 
@@ -157,23 +177,29 @@ def _scg_base():
 
 # ---------------------------------------------------------------- audit
 
-DRIVER = r'''
-# Hesiod -m13 driver: connect, then run Broadcom's per-object audit scripts with CSV output (read-only).
-param([string]$Tools, [string]$Out)
+CONNECT = r'''
+param([string]$Tools, [string]$Out, [string]$Jobs)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
+# Load the SSO admin module before any PowerCLI module: PowerCLI 9 brings a newer System.Private.ServiceModel, and
+# SsoAdmin then fails with "Could not load file or assembly 'VMware.System.Private.ServiceModel, Version=4.4.4.0'".
+try { Import-Module VMware.vSphere.SsoAdmin -ErrorAction Stop } catch { Write-Output "HESIOD-WARN SsoAdmin import: $_" }
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCEIP $false -Confirm:$false | Out-Null
 $sec = ConvertTo-SecureString $env:HESIOD_VC_PASSWORD -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($env:HESIOD_VC_USER, $sec)
 Connect-VIServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null
 try { Connect-CisServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null } catch { Write-Output "HESIOD-WARN CIS: $_" }
-# SsoAdmin's -SkipCertificateCheck is broken on Linux (missing AcceptAllX509CertificateValidator type), so connect with
-# normal TLS validation: -m13 --setup puts the lab root CA (Module 10) in this appliance's trust store.
+# SsoAdmin's -SkipCertificateCheck is broken on Linux, so connect with normal TLS validation first
+# (-m13 --setup puts the lab root CA from Module 10 in this appliance's trust store).
 $sso = $false
 try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO (validated TLS): $_" }
 if (-not $sso) { try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -SkipCertificateCheck -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO: $_" } }
 Write-Output "HESIOD-SSO connected=$sso"
 function Safe([string]$n) { $bad = [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars()); return ($n -replace "[$bad]", '_') }
+'''
+
+DRIVER = CONNECT + r'''
+# Audit: Broadcom's per-object audit scripts with CSV output (read-only)
 $vms = Get-VM | Sort-Object Name
 $hosts = Get-VMHost | Sort-Object Name
 Write-Output "HESIOD-INVENTORY vms=$($vms.Count) hosts=$($hosts.Count)"
@@ -195,6 +221,34 @@ Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue | Ou
 Write-Output "HESIOD-DONE"
 '''
 
+REMEDIATE_DRIVER = CONNECT + r'''
+# Remediation: Broadcom's remediation scripts, one job per object, limited to the selected controls (-Controls)
+# (not $jobs: PowerShell names are case-insensitive and $Jobs is a [string] parameter, which would flatten the list)
+$jobList = Get-Content $Jobs -Raw | ConvertFrom-Json
+foreach ($j in $jobList) {
+  $f = Join-Path $Out ($j.kind + "__" + (Safe $j.name) + ".csv")
+  $a = @{ AcceptEULA = $true; Controls = [string[]]$j.controls; CSVOutputFileName = $f; ErrorAction = "Stop" }
+  if ($j.kind -ne "vcenter") { $a.Name = $j.name } else { $a.Name = $global:DefaultVIServers.Name }
+  if ($j.kind -eq "vm") { $a.NoSafetyChecksExceptAppliances = $true } else { $a.NoSafetyChecks = $true }
+  foreach ($sw in $j.switches) { $a[$sw] = $true }
+  Write-Output ("HESIOD-JOB " + $j.kind + " " + $j.name + ": " + ($j.controls -join ",") + $(if ($j.switches) { " [" + ($j.switches -join ",") + "]" } else { "" }))
+  try { & (Join-Path $Tools $j.script) @a *> $null } catch { Write-Output "HESIOD-ERROR $($j.kind) $($j.name) : $_" }
+}
+Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+Write-Output "HESIOD-DONE"
+'''
+
+
+def _sso_warning(stdout):
+    if "HESIOD-SSO connected=False" in stdout:
+        liblog.print_logs("    WARNING: no SSO admin connection: the vCenter SSO password/lockout controls cannot be read "
+                          "(they report FAIL) or changed. See the SSO lines below.")
+
+
+def _env(cfg):
+    return {**os.environ, "HESIOD_VC": cfg["vcenter"], "HESIOD_VC_USER": "administrator@vsphere.local",
+            "HESIOD_VC_PASSWORD": cfg["password"]}
+
 
 def run_audit(lab_spec):
     cfg = scg_settings(lab_spec)
@@ -209,14 +263,11 @@ def run_audit(lab_spec):
     with open(driver, "w") as f:
         f.write(DRIVER)
     liblog.print_logs(f"(Audit) {cfg['vcenter']}: all VMs, all ESX hosts, vCenter (read-only). This takes several minutes.")
-    env = {**os.environ, "HESIOD_VC": cfg["vcenter"], "HESIOD_VC_USER": "administrator@vsphere.local",
-           "HESIOD_VC_PASSWORD": cfg["password"]}
-    p = _run([pwsh, "-NoProfile", "-NonInteractive", "-File", driver, "-Tools", tools, "-Out", out], 7200, env, check=False)
+    previous = open(f"{STATE_DIR}/latest").read().strip() if os.path.exists(f"{STATE_DIR}/latest") else ""
+    p = _run([pwsh, "-NoProfile", "-NonInteractive", "-File", driver, "-Tools", tools, "-Out", out], 7200, _env(cfg), check=False)
     with open(f"{out}/driver.log", "w") as f:
         f.write(p.stdout + "\n" + p.stderr)
-    if "HESIOD-SSO connected=False" in p.stdout:
-        liblog.print_logs("    WARNING: no SSO admin connection: vCenter SSO password/lockout controls will show as FAIL "
-                          "because they could not be read. Run -m13 --setup (trusts the lab root CA), then -m13 again.")
+    _sso_warning(p.stdout)
     for line in p.stdout.splitlines():
         if line.startswith("HESIOD-"):
             liblog.print_logs("    " + line.replace("HESIOD-", ""))
@@ -224,6 +275,9 @@ def run_audit(lab_spec):
         raise ScgError(f"the audit did not finish (rc={p.returncode}); see {out}/driver.log: {(p.stderr or p.stdout).strip()[-400:]}")
     with open(f"{STATE_DIR}/latest", "w") as f:
         f.write(out)
+    if previous:
+        with open(f"{out}/previous", "w") as f:
+            f.write(previous)
     liblog.print_logs(f"    Raw results: {out}")
     return out
 
@@ -240,14 +294,10 @@ def _controls_catalog():
 
 
 def _load_exceptions(cfg):
-    path = cfg["exceptions_file"]
-    if not os.path.exists(path):
-        return []
-    data = json.load(open(path))
     out = []
-    for i, e in enumerate(data.get("entries", [])):
+    for i, e in enumerate(cfg["exceptions"]):
         if not e.get("control") or not e.get("justification"):
-            raise ScgError(f"{path} entry {i}: control and justification are required")
+            raise ScgError(f"{cfg['config_file']} exceptions[{i}]: control and justification are required")
         if e.get("expires"):
             if datetime.date.fromisoformat(e["expires"]) < datetime.date.today():
                 liblog.print_logs(f"    Exception expired, ignored: {e['control']} ({e['expires']})")
@@ -337,6 +387,9 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
                         | {m["exception"]["control"] for m in manual if _unapproved(m.get("exception"))})
     result = "PASS" if counts.get("FAIL", 0) == 0 and counts.get("REVIEW", 0) == 0 and not open_manual and not unapproved else "FAIL"
 
+    delta = _delta(ev)
+    if delta:
+        liblog.print_logs(f"    Since the previous audit: {len(delta['fixed'])} result(s) fixed, {len(delta['regressed'])} regressed.")
     liblog.print_logs(f"SCG audit: {pct}% compliant or excepted ({good}/{total} results)  "
                       + "  ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     liblog.print_logs(f"    Controls not assessable by script: {len(manual)} ({len(open_manual)} still open)")
@@ -347,7 +400,7 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
     for (st, cid), objs in sorted(by_control.items(), key=lambda x: (x[0][0], -len(x[1]), x[0][1])):
         liblog.print_logs(f"    {st:<6} {cid:<40} {len(objs):>3} object(s)  {catalog.get(cid, {}).get('Description/Title', '')[:60]}")
     if unapproved:
-        liblog.print_logs(f"    Exceptions without approval: {', '.join(unapproved)} (set approved_by in {cfg['exceptions_file']})")
+        liblog.print_logs(f"    Exceptions without approval: {', '.join(unapproved)} (set approved_by in {cfg['config_file']} exceptions)")
 
     now = datetime.datetime.now()
     os.makedirs(out_dir, exist_ok=True)
@@ -356,7 +409,7 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
            "vcenter": cfg["vcenter"], "run": ev["run"], "result": result, "percent": pct, "counts": counts,
            "rows": [{k: v for k, v in r.items() if k != "exception"} | {"exception": (r["exception"] or {}).get("justification")} for r in rows],
            "manual": [{k: v for k, v in m.items() if k != "exception"} | {"exception": (m["exception"] or {}).get("justification")} for m in manual],
-           "exceptions": ev["exceptions"]}
+           "exceptions": ev["exceptions"], "delta": delta}
     with open(base + ".json", "w") as f:
         json.dump(rep, f, indent=2, default=str)
     with open(base + ".md", "w") as f:
@@ -364,6 +417,20 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
     shutil.copy(base + ".md", f"{ev['run']}/report.md")
     liblog.print_logs(f"Evidence report: {result} ({pct}%)  ->  {base}.md  (+ .json)")
     return rep
+
+
+def _delta(ev):
+    prev_file = f"{ev['run']}/previous"
+    if not os.path.exists(prev_file):
+        return None
+    prev_dir = open(prev_file).read().strip()
+    if not os.path.isdir(prev_dir):
+        return None
+    before = {(r["object"], r["control"]): r["level"] for r in parse_run(prev_dir)[0]}
+    after = {(r["object"], r["control"]): r["level"] for r in parse_run(ev["run"])[0]}
+    fixed = sorted(f"{c} on {o}" for (o, c), lv in after.items() if lv == "PASS" and before.get((o, c)) in ("FAIL", "WARNING"))
+    regressed = sorted(f"{c} on {o}" for (o, c), lv in after.items() if lv == "FAIL" and before.get((o, c)) == "PASS")
+    return {"previous_run": prev_dir, "fixed": fixed, "regressed": regressed}
 
 
 def _markdown(rep, catalog, by_control, unapproved):
@@ -409,5 +476,178 @@ def _markdown(rep, catalog, by_control, unapproved):
     L += ["## Per object", "", "| Type | Object | PASS | EXCEPTED | FAIL | REVIEW | APPLIANCE |", "|---|---|---|---|---|---|---|"]
     L += [f"| {k} | {n} | {v.get('PASS', 0)} | {v.get('EXCEPTED', 0)} | {v.get('FAIL', 0)} | {v.get('REVIEW', 0)} | {v.get('APPLIANCE', 0)} |"
           for (k, n), v in sorted(objs.items())]
+    if rep.get("delta"):
+        d = rep["delta"]
+        L += ["", "## Since the previous audit", "", f"Previous run `{d['previous_run']}`: {len(d['fixed'])} result(s) fixed, "
+              f"{len(d['regressed'])} regressed.", ""]
+        L += [f"- fixed: `{x}`" for x in d["fixed"][:200]] + [f"- **regressed**: `{x}`" for x in d["regressed"]]
     L += ["", f"Raw per-object CSVs: `{rep['run']}`"]
     return "\n".join(L) + "\n"
+
+
+# ---------------------------------------------------------------- remediation (-m13 --remediate --defcon N)
+
+GUARD_TEXT = re.compile(r"production environment|operational issues|host reboots|remove or comment|accept any and all risk|"
+                        r"may pose to your environment")   # Broadcom's standing warning lines, logged on every run
+SCRIPT_FOR = {"esx": "remediate-esx-9.ps1", "vcenter": "remediate-vcenter-9.ps1", "vm": "remediate-vm-9.ps1"}
+VM_SWITCHES = {"vm-9.remove-unnecessary-devices": "RemoveExtraDevices", "vm-9.virtual-hardware": "UpdateHardwareVersion"}
+
+
+def _defcon_map(cfg):
+    return cfg["controls"]
+
+
+def _level(dmap, control):
+    if control in dmap:
+        return dmap[control]
+    for k, v in dmap.items():
+        if "*" in k and fnmatch.fnmatch(control, k):
+            return v
+    return None
+
+
+def plan_remediation(lab_spec, defcon, only=None):
+    """Failing (not excepted) results from the last audit, graded DEFCON >= defcon, grouped into per-object jobs."""
+    cfg = scg_settings(lab_spec)
+    ev = evaluate(lab_spec)
+    dmap = _defcon_map(cfg)
+    jobs, python_actions, manual, skipped = {}, set(), {}, {}
+    for r in ev["rows"]:
+        if r["status"] not in ("FAIL", "REVIEW") or (only and r["control"] not in only):
+            continue
+        d = _level(dmap, r["control"])
+        if d is None:
+            skipped.setdefault(f"not graded in {cfg['config_file']} controls", set()).add(r["control"])
+            continue
+        if d["level"] < defcon:
+            skipped.setdefault(f"DEFCON {d['level']} (run with --defcon {d['level']} to include)", set()).add(r["control"])
+            continue
+        if d["via"] == "manual":
+            manual.setdefault(r["control"], set()).add(r["object"])
+            continue
+        if d["via"] == "python":
+            python_actions.add(r["control"])
+            continue
+        if r["kind"] == "vm" and not any(fnmatch.fnmatch(r["object"], p) for p in cfg["remediate_vms"]):
+            skipped.setdefault(f"VM not in {cfg['config_file']} remediate_vms", set()).add(f"{r['control']} on {r['object']}")
+            continue
+        j = jobs.setdefault((r["kind"], r["object"]), {"kind": r["kind"], "name": r["object"],
+                                                      "script": SCRIPT_FOR[r["kind"]], "controls": [], "switches": []})
+        if r["control"] not in j["controls"]:
+            j["controls"].append(r["control"])
+        sw = d.get("switch") or (VM_SWITCHES.get(r["control"]) if r["kind"] == "vm" else None)
+        if sw and sw not in j["switches"]:
+            j["switches"].append(sw)
+    for j in jobs.values():
+        if j["kind"] == "vm":
+            j["switches"].append("TakeSnapshot")
+        j["controls"].sort()
+    return {"jobs": sorted(jobs.values(), key=lambda j: ({"esx": 0, "vcenter": 1, "vm": 2}[j["kind"]], j["name"])),
+            "python": sorted(python_actions), "manual": manual, "skipped": skipped, "dmap": dmap}
+
+
+def _patched_tools():
+    """Working copy of Broadcom's tools with the deliberate 'Exit' guard removed from the remediation scripts
+    (their README asks for exactly that); everything else, including the opt-in switches, is unchanged."""
+    src = f"{_scg_base()}/tools"
+    dst = os.path.abspath(f"{STATE_DIR}/remediate-tools")
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+    guard = re.compile(r'(Log-Message "script and these commands may pose to your environment\." -Level "ERROR"\r?\n)Exit\r?\n')
+    for name in SCRIPT_FOR.values():
+        path = f"{dst}/{name}"
+        text = open(path, encoding="utf-8-sig").read()
+        new, n = guard.subn(r"\1# Exit  (guard removed by Theogony -m13 --remediate: scope limited with -Controls)\n", text)
+        if n != 1:
+            raise ScgError(f"{name}: the remediation guard was not found exactly once; the SCG scripts changed, review them first")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new)
+    return dst
+
+
+def _vsan_rebalance(lab_spec):
+    from python_lib import kms as libkms       # vCenter + vSAN API helpers (Module 12)
+    from pyVmomi import vim
+    si = libkms._vc_connect(lab_spec)
+    try:
+        cluster = libkms._cluster(si, {**lab_spec, "key_management": lab_spec.get("key_management") or {"ip_address": "-"}})
+        vccs = libkms._vsan_config_system(si, libkms._names(lab_spec)["vcenter"])
+        spec = vim.vsan.ReconfigSpec(modify=True, extendedConfig=vim.vsan.VsanExtendedConfig(
+            proactiveRebalanceInfo=vim.vsan.ProactiveRebalanceInfo(enabled=True, threshold=30)))
+        task = vccs.ReconfigureEx(cluster, spec)
+        libkms._wait(vim.Task(task._moId, si._stub), "vSAN automatic rebalance", 1800)
+        liblog.print_logs(f"    vsan-9.automatic-rebalance: enabled on {cluster.name} (threshold 30%).")
+    finally:
+        from pyVim.connect import Disconnect
+        Disconnect(si)
+
+
+def remediate(lab_spec, defcon=None, dry_run=False, only=None):
+    cfg = scg_settings(lab_spec)
+    defcon = cfg["defcon"] if defcon is None else defcon
+    if defcon not in (1, 2, 3, 4, 5):
+        raise ScgError("--defcon must be 1-5 (5 = safest controls only, 1 = everything)")
+    plan = plan_remediation(lab_spec, defcon, only)
+    names = {5: "DEFCON 5 (settings and policies)", 4: "DEFCON 4 (service/feature state)", 3: "DEFCON 3 (power cycles, switch security)",
+             2: "DEFCON 2 (lock-out risk)", 1: "DEFCON 1 (reboots, TLS cut-over)"}
+    liblog.print_logs(f"(Remediate) Scope: {' + '.join(names[l] for l in range(5, defcon - 1, -1))}"
+                      f"{'' if defcon != cfg['defcon'] else ' (default from ' + cfg['config_file'] + ')'}.")
+    for j in plan["jobs"]:
+        lv = sorted({_level(plan["dmap"], c)["level"] for c in j["controls"]})
+        liblog.print_logs(f"    {j['kind']:<7} {j['name']:<34} {len(j['controls']):>2} control(s), DEFCON {','.join(map(str, lv))}"
+                          + (f"  [{', '.join(j['switches'])}]" if j["switches"] else ""))
+    for c in plan["python"]:
+        liblog.print_logs(f"    theogony {c}")
+    for c, objs in sorted(plan["manual"].items()):
+        liblog.print_logs(f"    manual  {c} ({len(objs)} object(s)): {_level(plan['dmap'], c).get('note', '')}")
+    for why, items in sorted(plan["skipped"].items()):
+        liblog.print_logs(f"    skipped, {why}: {', '.join(sorted(items))}")
+    if dry_run or (not plan["jobs"] and not plan["python"]):
+        liblog.print_logs("Dry run: nothing changed." if dry_run else "Nothing to remediate at this DEFCON level.")
+        return plan
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = os.path.abspath(f"{STATE_DIR}/remediations/{stamp}")
+    os.makedirs(out)
+    with open(f"{out}/jobs.json", "w") as f:
+        json.dump(plan["jobs"], f, indent=2)
+    if plan["jobs"]:
+        tools = _patched_tools()
+        driver = f"{STATE_DIR}/remediate.ps1"
+        with open(driver, "w") as f:
+            f.write(REMEDIATE_DRIVER)
+        liblog.print_logs(f"(Remediate) Running {len(plan['jobs'])} job(s) with Broadcom's remediation scripts.")
+        p = _run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", driver, "-Tools", tools, "-Out", out,
+                  "-Jobs", f"{out}/jobs.json"], 14400, _env(cfg), check=False)
+        with open(f"{out}/driver.log", "w") as f:
+            f.write(p.stdout + "\n" + p.stderr)
+        _sso_warning(p.stdout)
+        for line in p.stdout.splitlines():
+            if line.startswith(("HESIOD-ERROR", "HESIOD-WARN", "HESIOD-SSO")):
+                liblog.print_logs("    " + line.replace("HESIOD-", ""))
+        updated, failed = {}, {}
+        for path in glob.glob(f"{out}/*.csv"):
+            obj = os.path.basename(path)[:-4].split("__", 1)[1]
+            with open(path, encoding="utf-8-sig") as f:
+                for r in csv.DictReader(f):
+                    if r.get("Level") == "UPDATE":
+                        updated.setdefault(obj, set()).add(r.get("Control"))
+                    elif r.get("Level") in ("FAIL", "ERROR") and not GUARD_TEXT.search(r.get("Message", "")):
+                        failed.setdefault(obj, []).append(f"{r.get('Control') or '-'}: {r.get('Message', '')[:120]}")
+        for obj in sorted(set(updated) | set(failed)):
+            liblog.print_logs(f"    {obj}: {len(updated.get(obj, []))} control(s) updated"
+                              + (f", {len(failed[obj])} not changed" if obj in failed else ""))
+            for msg in failed.get(obj, [])[:6]:
+                liblog.print_logs(f"        {msg}")
+        if "HESIOD-DONE" not in p.stdout:
+            raise ScgError(f"remediation did not finish; see {out}/driver.log")
+    for c in plan["python"]:
+        if c == "vsan-9.automatic-rebalance":
+            _vsan_rebalance(lab_spec)
+    liblog.print_logs("(Remediate) Auditing again to record the result.")
+    run_audit(lab_spec)
+    rep = report(lab_spec)
+    with open(f"{out}/result.json", "w") as f:
+        json.dump({"defcon": defcon, "jobs": plan["jobs"], "python": plan["python"], "after": rep["counts"],
+                   "percent_after": rep["percent"]}, f, indent=2)
+    return rep
