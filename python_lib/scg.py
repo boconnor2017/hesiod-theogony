@@ -4,7 +4,8 @@
 #              exceptions and manual attestations, and writes the evidence for US-014.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.3 (one config file: json_lib/scg.json, default DEFCON 5)
+# Version: 1.5 (appliance_vms in scg.json; SSO admin on PowerCLI 9 via SsoAdmin's own dependencies; Theogony fixes for
+#              settings the scripts can't create)
 #
 # -m13 --setup     install PowerShell + VCF.PowerCLI + VMware.vSphere.SsoAdmin on this appliance, fetch the SCG
 # -m13             audit vCenter, every ESX host and every VM (read-only), then the report
@@ -12,7 +13,8 @@
 # -m13 --remediate [--defcon N] [--dry-run] [--controls a,b]
 #                  fix the failing controls graded DEFCON N or safer (default: "defcon" in json_lib/scg.json, 5 = safest
 #                  only, 1 = everything), with Broadcom's remediation scripts limited to those controls, then audit again.
-#                  VMs are only touched when listed in scg.json remediate_vms (VCF appliances never).
+#                  VMs are only touched when listed in scg.json remediate_vms (VCF appliances never: Broadcom's notes
+#                  check plus scg.json appliance_vms).
 # Configuration: json_lib/scg.json (SCG version, default DEFCON, control grades, exceptions/attestations).
 #
 # Results per control and object:
@@ -32,17 +34,40 @@ import csv
 import datetime
 import fnmatch
 import glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import zipfile
 
 SCG_REPO = "https://github.com/vmware/vcf-security-and-compliance-guidelines"
 SCG_PATH = "security-configuration-hardening-guide/cloud-foundation/9.1"
 STATE_DIR = "conf/scg"
 PWSH_VERSION = "7.6.10"
 PWSH_DIR = "/opt/microsoft/powershell/7"
+
+# VMware.vSphere.SsoAdmin 1.4.0 is built against PowerCLI 12's VMware.VimAutomation.Common and loads these from it.
+# VCF.PowerCLI 9 no longer ships them, so Connect-SsoAdminServer fails with "Could not load file or assembly
+# 'VMware.System.Private.ServiceModel, Version=4.4.4.0'". --setup fetches the exact packages from the SsoAdmin source
+# tree (pinned commit, SHA-256 checked) and the PowerShell driver resolves them from SSO_DEPS_DIR.
+SSO_DEPS_DIR = f"{STATE_DIR}/ssoadmin-deps"
+SSO_DEPS_URL = ("https://raw.githubusercontent.com/vmware/PowerCLI-Example-Scripts/097172029b710036232f3937dd7c04bbb6a760ad/"
+                "Modules/VMware.vSphere.SsoAdmin/src/VMware.vSphere.SsoAdmin.Client/packages/")
+SSO_DEPS = [  # (package, sha256, dll inside the package)
+    ("VMware.System.Private.ServiceModel.4.4.4.nupkg", "d6bc8f12f94ee6ae6c4a52697b6a344f72762ae4ab9e5e262c2a722b3e9b8ff9",
+     "lib/netcoreapp2.0/VMware.System.Private.ServiceModel.dll"),
+    ("VMware.Binding.Sts.12.0.0.15939652.nupkg", "e3305b573fb847344c18fbab9518d8f9a887421e091899d1a3d7c0f004c94e79",
+     "lib/netcoreapp2.0/VMware.Binding.Sts.dll"),
+    ("VMware.Binding.WsTrust.12.0.0.15939652.nupkg", "78c727f3d2753146578406aff3a4febcd7868584484ebf3e8c26c679d107ab58",
+     "lib/netcoreapp2.0/VMware.Binding.WsTrust.dll"),
+    ("VMware.Http.Handlers.12.0.0.15939652.nupkg", "12de27357b127b2b362b44404044d1085e3ccd4726ebbd7a9a7f912ae98078a0",
+     "lib/netstandard2.0/VMware.Http.Handlers.dll"),
+    ("VMware.Util.Sspi.12.0.0.15939652.nupkg", "d716f489652074a9876e5c854f7bd331d241aff818c5afaad3bf7a4731e84055",
+     "lib/netstandard2.0/VMware.Util.Sspi.dll"),
+]
 
 
 class ScgError(Exception):
@@ -70,6 +95,7 @@ def scg_settings(lab_spec):
             "components": [c.lower() for c in s.get("components", ["esx-9", "vcenter-9", "vm-9", "vsan-9", "nsx-9", "sddc-9"])],
             "controls": s.get("controls", {}), "exceptions": s.get("exceptions", []),
             "remediate_vms": [v for v in s.get("remediate_vms", []) if not str(v).startswith("<")],
+            "appliance_vms": [v for v in s.get("appliance_vms", []) if not str(v).startswith("<")],
             "vcenter": plan["vcenter"]["fqdns"]["vcenter"]["fqdn"],
             "password": lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]}
 
@@ -125,10 +151,34 @@ Set-PowerCLIConfiguration -Scope AllUsers -ParticipateInCEIP $false -Confirm:$fa
         if line.startswith(("present", "installed")):
             liblog.print_logs("    " + line)
 
+    sso_dependencies()
     trust_lab_root()
     fetch_scg(cfg)
     liblog.print_logs("Setup complete.")
     return pwsh
+
+
+def sso_dependencies(quiet=False):
+    """The five .NET assemblies SsoAdmin 1.4.0 needs that VCF.PowerCLI 9 does not ship (see SSO_DEPS)."""
+    want = [os.path.join(SSO_DEPS_DIR, os.path.basename(inner)) for _, _, inner in SSO_DEPS]
+    if all(os.path.exists(f) for f in want):
+        if not quiet:
+            liblog.print_logs(f"(Setup 2b) SsoAdmin dependencies present ({SSO_DEPS_DIR}).")
+        return True
+    liblog.print_logs("(Setup 2b) Fetching SsoAdmin's .NET dependencies (VMware.System.Private.ServiceModel 4.4.4, "
+                      "VMware.Binding.Sts/WsTrust 12.0) from the SsoAdmin source tree.")
+    os.makedirs(SSO_DEPS_DIR, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        for pkg, sha, inner in SSO_DEPS:
+            path = os.path.join(tmp, pkg)
+            _run(["curl", "-sSLf", "-o", path, SSO_DEPS_URL + pkg], 300)
+            got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+            if got != sha:
+                raise ScgError(f"{pkg}: SHA-256 mismatch ({got}); not using it")
+            with zipfile.ZipFile(path) as z, open(os.path.join(SSO_DEPS_DIR, os.path.basename(inner)), "wb") as f:
+                f.write(z.read(inner))
+    liblog.print_logs(f"    {len(SSO_DEPS)} assemblies in {SSO_DEPS_DIR} (SHA-256 verified).")
+    return True
 
 
 def trust_lab_root():
@@ -181,16 +231,35 @@ CONNECT = r'''
 param([string]$Tools, [string]$Out, [string]$Jobs)
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
-# Load the SSO admin module before any PowerCLI module: PowerCLI 9 brings a newer System.Private.ServiceModel, and
-# SsoAdmin then fails with "Could not load file or assembly 'VMware.System.Private.ServiceModel, Version=4.4.4.0'".
+# SsoAdmin 1.4.0 needs VMware.System.Private.ServiceModel 4.4.4 and VMware.Binding.Sts/WsTrust 12.0, which VCF.PowerCLI 9
+# no longer ships. Resolve them from the copies -m13 --setup put in conf/scg/ssoadmin-deps (only when .NET can't find them).
+$deps = $env:HESIOD_SSO_DEPS
+if ($deps -and (Test-Path $deps)) {
+  try {
+    Add-Type -TypeDefinition @"
+using System; using System.IO; using System.Reflection;
+public static class HesiodSsoResolver {
+  static string dir;
+  public static void Register(string d) { dir = d; AppDomain.CurrentDomain.AssemblyResolve += Resolve; }
+  static Assembly Resolve(object s, ResolveEventArgs e) {
+    var f = Path.Combine(dir, new AssemblyName(e.Name).Name + ".dll");
+    if (!File.Exists(f)) return null;
+    foreach (var a in AppDomain.CurrentDomain.GetAssemblies()) { try { if (a.Location == f) return a; } catch {} }
+    return Assembly.LoadFrom(f);
+  }
+}
+"@
+    [HesiodSsoResolver]::Register($deps)
+  } catch { Write-Output "HESIOD-WARN SsoAdmin dependency resolver: $_" }
+} else { Write-Output "HESIOD-WARN SsoAdmin dependencies missing ($deps): run -m13 --setup" }
 try { Import-Module VMware.vSphere.SsoAdmin -ErrorAction Stop } catch { Write-Output "HESIOD-WARN SsoAdmin import: $_" }
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCEIP $false -Confirm:$false | Out-Null
 $sec = ConvertTo-SecureString $env:HESIOD_VC_PASSWORD -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($env:HESIOD_VC_USER, $sec)
 Connect-VIServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null
 try { Connect-CisServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null } catch { Write-Output "HESIOD-WARN CIS: $_" }
-# SsoAdmin's -SkipCertificateCheck is broken on Linux, so connect with normal TLS validation first
-# (-m13 --setup puts the lab root CA from Module 10 in this appliance's trust store).
+# Normal TLS validation first (-m13 --setup puts the lab root CA from Module 10 in this appliance's trust store),
+# then -SkipCertificateCheck.
 $sso = $false
 try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO (validated TLS): $_" }
 if (-not $sso) { try { Connect-SsoAdminServer -Server $env:HESIOD_VC -Credential $cred -SkipCertificateCheck -ErrorAction Stop | Out-Null; $sso = $true } catch { Write-Output "HESIOD-WARN SSO: $_" } }
@@ -247,7 +316,7 @@ def _sso_warning(stdout):
 
 def _env(cfg):
     return {**os.environ, "HESIOD_VC": cfg["vcenter"], "HESIOD_VC_USER": "administrator@vsphere.local",
-            "HESIOD_VC_PASSWORD": cfg["password"]}
+            "HESIOD_VC_PASSWORD": cfg["password"], "HESIOD_SSO_DEPS": os.path.abspath(SSO_DEPS_DIR)}
 
 
 def run_audit(lab_spec):
@@ -256,6 +325,10 @@ def run_audit(lab_spec):
     if not pwsh:
         raise ScgError("PowerShell is not installed: run -m13 --setup")
     tools = os.path.abspath(f"{_scg_base()}/tools")
+    try:
+        sso_dependencies(quiet=True)
+    except Exception as e:  # the audit still runs; only the SSO controls need these
+        liblog.print_logs(f"    WARNING: SsoAdmin dependencies not available ({e}); SSO controls will report FAIL.")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = os.path.abspath(f"{STATE_DIR}/runs/{stamp}")
     os.makedirs(out)
@@ -342,6 +415,12 @@ def evaluate(lab_spec, run_dir=None):
     if not run_dir or not os.path.isdir(run_dir):
         raise ScgError("no audit run found: run -m13 first")
     rows, appliances = parse_run(run_dir)
+    # VCF appliances Broadcom's check misses (it only looks for "VMware" in the VM notes): scg.json appliance_vms.
+    # Same treatment as the ones it finds: one APPLIANCE result per VM, never remediated.
+    listed = sorted({r["object"] for r in rows if r["kind"] == "vm"
+                     and any(fnmatch.fnmatch(r["object"], p) for p in cfg["appliance_vms"])})
+    rows = [r for r in rows if not (r["kind"] == "vm" and r["object"] in listed)]
+    appliances = sorted(set(appliances) | set(listed))
     exceptions = _load_exceptions(cfg)
     catalog = _controls_catalog()
     for r in rows:
@@ -528,7 +607,8 @@ def plan_remediation(lab_spec, defcon, only=None):
         if d["via"] == "python":
             python_actions.add(r["control"])
             continue
-        if r["kind"] == "vm" and not any(fnmatch.fnmatch(r["object"], p) for p in cfg["remediate_vms"]):
+        if r["kind"] == "vm" and (not any(fnmatch.fnmatch(r["object"], p) for p in cfg["remediate_vms"])
+                                  or any(fnmatch.fnmatch(r["object"], p) for p in cfg["appliance_vms"])):
             skipped.setdefault(f"VM not in {cfg['config_file']} remediate_vms", set()).add(f"{r['control']} on {r['object']}")
             continue
         j = jobs.setdefault((r["kind"], r["object"]), {"kind": r["kind"], "name": r["object"],
@@ -582,6 +662,84 @@ def _vsan_rebalance(lab_spec):
         Disconnect(si)
 
 
+def _vc_option(si, key, value):
+    """Set (or create) a vCenter advanced setting. Broadcom's script pipes Get-AdvancedSetting into Set-AdvancedSetting,
+    which silently does nothing when the key does not exist yet, but still logs UPDATE."""
+    from pyVmomi import vim
+    om = si.content.setting
+    try:
+        current = om.QueryView(key)[0].value
+    except vim.fault.InvalidName:
+        current = None
+    if current is not None and str(current) == str(value):
+        return f"already {current}"
+    om.UpdateValues([vim.option.OptionValue(key=key, value=str(value))])
+    return f"{'missing' if current is None else current} -> {value}"
+
+
+def _vpxuser_length(lab_spec, si):
+    liblog.print_logs(f"    vcenter-9.vpxuser-length: config.vpxd.hostPasswordLength "
+                      f"{_vc_option(si, 'config.vpxd.hostPasswordLength', 32)}.")
+
+
+def _esx_option_all_hosts(si, control, key, value):
+    """Set an ESX advanced setting on every host, keeping the option's own type. ESX cannot create options, so a
+    host without the key is reported (attest it in json_lib/scg.json if it does not apply)."""
+    from pyVmomi import vim, VmomiSupport
+    view = si.content.viewManager.CreateContainerView(si.content.rootFolder, [vim.HostSystem], True)
+    try:
+        hosts = sorted(view.view, key=lambda h: h.name)
+    finally:
+        view.Destroy()
+    for h in hosts:
+        om = h.configManager.advancedOption
+        try:
+            cur = om.QueryView(key)[0].value
+        except vim.fault.InvalidName:
+            liblog.print_logs(f"    {control}: {h.name}: {key} does not exist on this host; not changed.")
+            continue
+        if cur == value:
+            liblog.print_logs(f"    {control}: {h.name}: {key} already {cur}.")
+            continue
+        typed = VmomiSupport.long(value) if isinstance(cur, int) and not isinstance(cur, bool) else type(cur)(value)
+        om.UpdateOptions([vim.option.OptionValue(key=key, value=typed)])
+        liblog.print_logs(f"    {control}: {h.name}: {key} {cur} -> {value}.")
+
+
+def _esx_memory_tiering_encryption(lab_spec, si):
+    _esx_option_all_hosts(si, "esx-9.memory-tiering-encryption", "Mem.EncryptTierNvme", 1)
+
+
+def _vsan_rebalance_fix(lab_spec, si):
+    _vsan_rebalance(lab_spec)
+
+
+# Controls Theogony fixes itself ("via": "python" in json_lib/scg.json)
+PYTHON_FIXES = {
+    "vsan-9.automatic-rebalance": _vsan_rebalance_fix,
+    "vcenter-9.vpxuser-length": _vpxuser_length,
+    "esx-9.memory-tiering-encryption": _esx_memory_tiering_encryption,
+}
+
+
+def _python_fixes(lab_spec, controls):
+    from python_lib import kms as libkms
+    from pyVim.connect import Disconnect
+    si = libkms._vc_connect(lab_spec)
+    try:
+        for c in controls:
+            fix = PYTHON_FIXES.get(c)
+            if not fix:
+                liblog.print_logs(f"    {c}: graded via python in json_lib/scg.json, but Theogony has no fix for it.")
+                continue
+            try:
+                fix(lab_spec, si)
+            except Exception as e:
+                liblog.print_logs(f"    {c}: not changed: {e}")
+    finally:
+        Disconnect(si)
+
+
 def remediate(lab_spec, defcon=None, dry_run=False, only=None):
     cfg = scg_settings(lab_spec)
     defcon = cfg["defcon"] if defcon is None else defcon
@@ -606,6 +764,7 @@ def remediate(lab_spec, defcon=None, dry_run=False, only=None):
         liblog.print_logs("Dry run: nothing changed." if dry_run else "Nothing to remediate at this DEFCON level.")
         return plan
 
+    updated, failed = {}, {}
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = os.path.abspath(f"{STATE_DIR}/remediations/{stamp}")
     os.makedirs(out)
@@ -625,7 +784,6 @@ def remediate(lab_spec, defcon=None, dry_run=False, only=None):
         for line in p.stdout.splitlines():
             if line.startswith(("HESIOD-ERROR", "HESIOD-WARN", "HESIOD-SSO")):
                 liblog.print_logs("    " + line.replace("HESIOD-", ""))
-        updated, failed = {}, {}
         for path in glob.glob(f"{out}/*.csv"):
             obj = os.path.basename(path)[:-4].split("__", 1)[1]
             with open(path, encoding="utf-8-sig") as f:
@@ -641,12 +799,19 @@ def remediate(lab_spec, defcon=None, dry_run=False, only=None):
                 liblog.print_logs(f"        {msg}")
         if "HESIOD-DONE" not in p.stdout:
             raise ScgError(f"remediation did not finish; see {out}/driver.log")
-    for c in plan["python"]:
-        if c == "vsan-9.automatic-rebalance":
-            _vsan_rebalance(lab_spec)
+    if plan["python"]:
+        liblog.print_logs(f"(Remediate) Theogony fixes: {', '.join(plan['python'])}.")
+        _python_fixes(lab_spec, plan["python"])
     liblog.print_logs("(Remediate) Auditing again to record the result.")
     run_audit(lab_spec)
     rep = report(lab_spec)
+    # Broadcom's scripts log UPDATE even when Set-AdvancedSetting had nothing to act on; call those out.
+    still = sorted({(r["control"], r["object"]) for r in evaluate(lab_spec)["rows"] if r["status"] == "FAIL"}
+                   & {(c, obj) for obj, cs in (updated if plan["jobs"] else {}).items() for c in cs})
+    if still:
+        liblog.print_logs(f"    WARNING: {len(still)} result(s) the scripts reported as updated still FAIL:")
+        for c, obj in still[:10]:
+            liblog.print_logs(f"        {c} on {obj}")
     with open(f"{out}/result.json", "w") as f:
         json.dump({"defcon": defcon, "jobs": plan["jobs"], "python": plan["python"], "after": rep["counts"],
                    "percent_after": rep["percent"]}, f, indent=2)
