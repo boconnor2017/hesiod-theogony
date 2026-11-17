@@ -4,7 +4,7 @@
 #              exceptions and manual attestations, and writes the evidence for US-014.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.6 (vCenter SSO policy read/set in vCenter's own directory (vmdir) over LDAPS instead of SsoAdmin;
+# Version: 1.6.1 (vCenter SSO policy read/set in vCenter's own directory (vmdir) over LDAPS instead of SsoAdmin;
 #              appliance_vms; Theogony fixes for settings the scripts can't create)
 #
 # -m13 --setup     install PowerShell + VCF.PowerCLI on this appliance, fetch the SCG
@@ -459,10 +459,7 @@ def evaluate(lab_spec, run_dir=None):
     run_dir = run_dir or (open(f"{STATE_DIR}/latest").read().strip() if os.path.exists(f"{STATE_DIR}/latest") else None)
     if not run_dir or not os.path.isdir(run_dir):
         raise ScgError("no audit run found: run -m13 first")
-    rows, appliances = parse_run(run_dir)
-    sso = json.load(open(f"{run_dir}/sso.json")) if os.path.exists(f"{run_dir}/sso.json") else {}
-    if sso.get("ok"):
-        rows = [r for r in rows if r["control"] not in SSO_CONTROLS] + sso["rows"]
+    rows, appliances = _run_rows(run_dir)
     # VCF appliances Broadcom's check misses (it only looks for "VMware" in the VM notes): scg.json appliance_vms.
     # Same treatment as the ones it finds: one APPLIANCE result per VM, never remediated.
     listed = sorted({r["object"] for r in rows if r["kind"] == "vm"
@@ -517,6 +514,8 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
     delta = _delta(ev)
     if delta:
         liblog.print_logs(f"    Since the previous audit: {len(delta['fixed'])} result(s) fixed, {len(delta['regressed'])} regressed.")
+        for x in delta["regressed"][:10]:
+            liblog.print_logs(f"        regressed: {x}")
     liblog.print_logs(f"SCG audit: {pct}% compliant or excepted ({good}/{total} results)  "
                       + "  ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     liblog.print_logs(f"    Controls not assessable by script: {len(manual)} ({len(open_manual)} still open)")
@@ -546,6 +545,26 @@ def report(lab_spec, run_dir=None, out_dir="conf/evidence"):
     return rep
 
 
+def _run_rows(run_dir):
+    """The script results of a run with Theogony's SSO policy results in place of Broadcom's SSO checks."""
+    rows, appliances = parse_run(run_dir)
+    sso = json.load(open(f"{run_dir}/sso.json")) if os.path.exists(f"{run_dir}/sso.json") else {}
+    if sso.get("ok"):
+        rows = [r for r in rows if r["control"] not in SSO_CONTROLS] + sso["rows"]
+    return rows, appliances
+
+
+def _control_levels(run_dir):
+    """One level per (object, control): FAIL if any of its checks failed, else WARNING if any, else PASS."""
+    rank = {"PASS": 0, "WARNING": 1, "FAIL": 2}
+    out = {}
+    for r in _run_rows(run_dir)[0]:
+        k = (r["object"], r["control"])
+        if rank[r["level"]] >= rank.get(out.get(k), -1):
+            out[k] = r["level"]
+    return out
+
+
 def _delta(ev):
     prev_file = f"{ev['run']}/previous"
     if not os.path.exists(prev_file):
@@ -553,8 +572,7 @@ def _delta(ev):
     prev_dir = open(prev_file).read().strip()
     if not os.path.isdir(prev_dir):
         return None
-    before = {(r["object"], r["control"]): r["level"] for r in parse_run(prev_dir)[0]}
-    after = {(r["object"], r["control"]): r["level"] for r in parse_run(ev["run"])[0]}
+    before, after = _control_levels(prev_dir), _control_levels(ev["run"])
     fixed = sorted(f"{c} on {o}" for (o, c), lv in after.items() if lv == "PASS" and before.get((o, c)) in ("FAIL", "WARNING"))
     regressed = sorted(f"{c} on {o}" for (o, c), lv in after.items() if lv == "FAIL" and before.get((o, c)) == "PASS")
     return {"previous_run": prev_dir, "fixed": fixed, "regressed": regressed}
