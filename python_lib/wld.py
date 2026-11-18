@@ -5,7 +5,7 @@
 #              Certificates, backups and encryption for the new vCenter/NSX come from Modules 10, 11 and 12.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (vMotion, vSAN and host TEP ranges on their own lab_spec networks: assign_ip_from_this_network)
 #
 # IP plan: the workload domain vCenter, NSX VIP and NSX node(s) take the addresses right after the highest one already
 # allocated in the Module 4 DNS range of the management network (VCF management components, every nested ESXi host,
@@ -118,18 +118,46 @@ def _allocate(lab_spec, w, labels):
 
 
 def _network(lab_spec, role, rng, what):
-    r = libvcf._role(lab_spec, role)
-    if not r:
-        raise WldError(f"vcf.networks.{role} is missing")
+    """A workload domain range on its own VLAN: rng["assign_ip_from_this_network"] (an index into lab_spec["network"]),
+    else the network the management domain uses for that role (vcf.networks)."""
     if not rng or "range_start" not in rng or "range_end" not in rng:
         raise WldError(f"workload_domains[].{what} needs range_start and range_end")
-    ips = _range(r["gateway"], rng["range_start"], rng["range_end"])
-    used = set(r.get("range") or [])                            # the management domain's range on that network
-    overlap = sorted(used & set(ips), key=ipaddress.ip_address)
-    if overlap:
-        raise WldError(f"workload_domains[].{what} overlaps the management domain's vcf.networks.{role} range "
-                       f"({overlap[0]} ... {overlap[-1]}); pick addresses outside {r['range'][0]}-{r['range'][-1]}")
-    return {**r, "range": ips}
+    idx = rng.get("assign_ip_from_this_network")
+    if idx is not None and not str(idx).startswith("<"):
+        try:
+            net = libvcf._net(lab_spec, int(idx))
+        except (IndexError, KeyError, ValueError) as e:
+            raise WldError(f"workload_domains[].{what}.assign_ip_from_this_network={idx!r}: no such lab_spec network ({e!r})")
+    else:
+        net = libvcf._role(lab_spec, role)
+        if not net:
+            raise WldError(f"workload_domains[].{what} has no assign_ip_from_this_network and vcf.networks.{role} is missing")
+        net = {k: v for k, v in net.items() if k != "range"}
+    ips = _range(net["gateway"], rng["range_start"], rng["range_end"])
+    subnet = ipaddress.ip_network(net["subnet"])
+    outside = [ip for ip in (ips[0], ips[-1]) if ipaddress.ip_address(ip) not in subnet]
+    if outside:
+        raise WldError(f"workload_domains[].{what}: {outside[0]} is outside {net['subnet']} ({net['name']})")
+    if net["gateway"] in ips:
+        raise WldError(f"workload_domains[].{what} includes the gateway {net['gateway']}")
+    return {**net, "range": ips, "what": what}
+
+
+def _check_overlaps(lab_spec, nets):
+    """No overlap with any management domain range on the same subnet, nor between the workload domain's own ranges."""
+    claims = []
+    for role in ("vmotion", "vsan", "host_tep"):
+        r = libvcf._role(lab_spec, role)
+        if r and r.get("range"):
+            claims.append((f"the management domain's vcf.networks.{role}", r["subnet"], set(r["range"])))
+    for n in nets:
+        mine = set(n["range"])
+        for owner, subnet, ips in claims:
+            both = sorted(mine & ips, key=ipaddress.ip_address) if subnet == n["subnet"] else []
+            if both:
+                raise WldError(f"workload_domains[].{n['what']} ({n['range'][0]}-{n['range'][-1]} on {n['subnet']}) "
+                               f"overlaps {owner} at {both[0]}" + (f" ... {both[-1]}" if len(both) > 1 else ""))
+        claims.append((f"workload_domains[].{n['what']}", n["subnet"], mine))
 
 
 def wld_settings(lab_spec, name=None):
@@ -158,6 +186,13 @@ def wld_settings(lab_spec, name=None):
     pw = lab_spec["authentication"][vcf["use_these_credentials"]]["password"]
     pool = w.get("network_pool", {})
     sp = w.get("storage_policy", {})
+    nets = [_network(lab_spec, "vmotion", pool.get("vmotion"), "network_pool.vmotion"),
+            _network(lab_spec, "vsan", pool.get("vsan"), "network_pool.vsan"),
+            _network(lab_spec, "host_tep", w.get("host_tep"), "host_tep")]
+    _check_overlaps(lab_spec, nets)
+    if nets[0]["subnet"] == nets[1]["subnet"]:
+        raise WldError(f"network_pool.vmotion and network_pool.vsan are both on {nets[0]['subnet']}; a network pool "
+                       f"needs a separate subnet (VLAN) for each")
     return {
         "name": w["name"], "entry": w, "recorded": bool(recorded),
         "hosts": hosts, "addresses": addresses, "mgmt": mgmt,
@@ -168,9 +203,7 @@ def wld_settings(lab_spec, name=None):
         "esa": str(w.get("vsan_type", vcf.get("cluster", {}).get("vsan_type", "ESA"))).upper() == "ESA",
         "vmnics": w.get("vmnics") or vcf.get("cluster", {}).get("vmnics", ["vmnic0", "vmnic1"]),
         "pool_name": pool.get("name", f"np-{w['name']}"),
-        "vmotion": _network(lab_spec, "vmotion", pool.get("vmotion"), "network_pool.vmotion"),
-        "vsan": _network(lab_spec, "vsan", pool.get("vsan"), "network_pool.vsan"),
-        "tep": _network(lab_spec, "host_tep", w.get("host_tep"), "host_tep"),
+        "vmotion": nets[0], "vsan": nets[1], "tep": nets[2],
         "image": None if str(w.get("cluster_image") or "<").startswith("<") else w["cluster_image"],
         "policy": {"name": sp.get("name", f"{w['name']}-r5"), "ftt": int(sp.get("failures_to_tolerate", 1)),
                    "raid5": str(sp.get("raid", "RAID-5")).upper().startswith("RAID-5")},
