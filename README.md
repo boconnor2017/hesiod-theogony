@@ -37,13 +37,17 @@ sudo python3 hesiod-theogony.py -init
 You have now deployed the **Hesiod Main Appliance**. Run `sudo python3 hesiod-theogony.py --help` for details on CLI commands. Use this program to orchestrate the modules below.
 
 # Modules: Deploy a VMware Lab Environment
-Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly. The source of all configuration details is a file `lab_spec.json` that is stored in the `conf/` folder. **WARNING: Do not edit or remove any of the files in /json_lib. Copy only. Do not edit or remove any of the files in /conf other than lab_spec.json as these are used throughout each module.**
+Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly. The source of all configuration details is a file called `lab_spec.json` that is stored in the `conf/` folder. **WARNING: Do not edit or remove any of the files in /json_lib. These are to be COPIED only. Do not edit or remove any of the files in /conf other than lab_spec.json. The files in /conf are used as a configuration database for the modules below.**
 
-## Module 1: Create Lab Spec JSON files 
+## Module 1: Create a Lab Spec JSON file
 | Prerequisite | Comments                                     |
 |--------------|----------------------------------------------|
-| Getting Started | Hesiod Main Appiance needs to be deployed. |
+| Getting Started | Hesiod Main Appiance needs to be deployed.|
 
+### Manual Process
+Use the instructions from [lab_spec.json Instructions](../hesiod-theogony/docs/json_lib.md) to create your first `conf/lab_spec.json` file. 
+
+### Prompted/Automated Process
 *Coming Soon: a CLI prompt questionnaire to help you create your first conf/lab_spec.json configuration file.*
 ```
 sudo python3 hesiod-theogony.py -m1
@@ -241,7 +245,7 @@ sudo python3 hesiod-theogony.py -m11 --report
 | Module 8     | VCF Fleet is deployed.                       |
 | Module 9     | Password Vault is configured and available.  |
 
-This script uses the configuration from `lab_spec.json` in Module 1 to build a Key Management Server Kubernetes pod on HKS from Module 2 and configures data in motion and data at rest encryption on vSAN clusters deployed in Module 8. Secrets are stored in the password vault from Module 9. **IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+This script uses the configuration from `lab_spec.json` in Module 1 to build a Key Management Server Kubernetes pod on HKS from Module 2 and configures data in motion and data at rest encryption on vSAN clusters deployed in Module 8. Secrets are stored in the password vault from Module 9. **IMPORTANT: Run each script below in the following order and ensure results are successful before proceeding to the next.**
 
 Deploy KMS server.
 ```
@@ -293,7 +297,7 @@ sudo python3 hesiod-theogony.py -m13 --remediate
 ``` 
 
 
-## DEFCON LEVELS
+### DEFCON LEVELS
 | DEFCON LEVEL | DEFCON DESCRIPTION                  | RISK             |
 |--------------|-------------------------------------|------------------|
 | DEFCON 5     | Changes settings and policies only. | Safest (default) |
@@ -321,7 +325,7 @@ sudo python3 hesiod-theogony.py -m13 --defcon N --remediate
 | Module 11    | SFTP backup server is deployed and available.|
 | Module 12    | KMS Server is deployed and available.        |
 
-This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and build a VI workload domain. Integrations to all shared services running on HKS from Module 2 (DNS, LDAP, Password Vault, CA, SFTP, etc) are automatically included.
+This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and build a VI workload domain. Integrations to all shared services running on HKS from Module 2 (DNS, LDAP, Password Vault, CA, SFTP, etc) are automatically included. **IMPORTANT: Run each script below in the following order and ensure results are successful before proceeding to the next.** 
 
 Creates network pool and commissions the VI hosts in SDDC Manager.
 ```
