@@ -10,7 +10,8 @@
 #              Replaces hesiod-vcf9 module 4 (pcli_create_vm_from_iso + Set-VMKeystrokes + pcli_prep_esxi_hosts_for_VCF).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.8 (nested hosts use vcf.nameservers when set)
+# Version: 1.9 (IPAM: VI/other non-MGT hosts skip IPs Module 8 allocates to VCF components and pools, and any IP that
+#              already answers ping, so a VI host can no longer take e.g. the VCF Automation platform address)
 #
 # Public functions
 #   create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False)  Build every host (optionally only "MGT"/"VI").
@@ -90,16 +91,60 @@ def _dns_name_for_ip(lab_spec, ip):
     return None
 
 
+def _reserved_ips(lab_spec):
+    """IP -> what owns it: every FQDN address and pool address Module 8 allocates (vcf.get_vcf_plan). These sit after
+    the MGT range, inside the range a VI group is likely to use, and some (pools, VCF Automation/VSP nodes) never get
+    a DNS record of their own, so they are easy to collide with."""
+    if not lab_spec.get("vcf", {}).get("components"):
+        return {}
+    from python_lib import vcf as libvcf  # imported here: vcf.py imports this module
+    reserved = {}
+    try:
+        plan = libvcf.get_vcf_plan(lab_spec)
+    except Exception as e:
+        liblog.print_logs(f"    IPAM: VCF plan not available ({e}); only the live ping check protects VCF addresses.")
+        return reserved
+    for entry in plan:
+        for label, f in entry["fqdns"].items():
+            reserved[f["ip"]] = f"{entry['component']} {label} ({f['fqdn']})"
+        for ip in entry["pool"]:
+            reserved[ip] = f"{entry['component']} IP pool"
+    return reserved
+
+
+def _allocate(gtype, ip_range, count, taken):
+    """MGT keeps the plain in-order range (Module 8 plans the VCF addresses after it). Other groups take the first
+    `count` addresses of their range that nothing else owns, in order."""
+    if gtype == "MGT":
+        return ip_range[:count]
+    used, skipped = [], []
+    for ip in ip_range:
+        if len(used) == count:
+            break
+        (skipped if ip in taken else used).append(ip)
+    for ip in skipped:
+        liblog.print_logs(f"    IPAM: '{gtype}' skips {ip}: already allocated to {taken[ip]}.")
+    if len(used) < count:
+        raise EsxiBuildError("lab_spec", f"'{gtype}': deploy_this_many={count} but only {len(used)} free IP(s) in its range "
+                                         f"after skipping {len(skipped)} allocated elsewhere; widen the range")
+    return used
+
+
 def get_nested_esxi_specs(lab_spec, types=None):
     specs = []
+    taken = _reserved_ips(lab_spec)
+    for group in lab_spec["nested_esxi_servers"]:  # every group's hosts, also ones not being built in this run
+        if str(group.get("nested_esxi_type", "")).upper() == "MGT":
+            net = lab_spec["network"][group["assign_ip_from_this_network"]]
+            for ip in libvmw.get_ip_range(net["default_gateway"], group["assign_ip_from_this_range_start"],
+                                          group["assign_ip_from_this_range_end"])[:int(group["deploy_this_many"])]:
+                taken[ip] = f"{group.get('naming_convention', 'MGT')} host"
     domain = lab_spec.get("domain", {})
     # Nested hosts are VCF hosts: use vcf.nameservers when set (every VCF nameserver must resolve the lab domain),
     # otherwise every domain.server_ips entry, in lab_spec order.
     dns = [s for s in (lab_spec.get("vcf", {}).get("nameservers") or domain.get("server_ips", [])) if libubuntu._is_ip(s)]
     for group in lab_spec["nested_esxi_servers"]:
         gtype = str(group.get("nested_esxi_type", "")).upper()
-        if types and gtype not in [t.upper() for t in types]:
-            continue
         try:
             host = lab_spec["physical_esxi_servers"][group["deploy_to_this_physical_host"]]
             phys_auth = lab_spec["authentication"][host["use_these_credentials"]]
@@ -110,6 +155,11 @@ def get_nested_esxi_specs(lab_spec, types=None):
             count = int(group["deploy_this_many"])
             if len(ip_range) < count:
                 raise EsxiBuildError("lab_spec", f"'{gtype}': deploy_this_many={count} but the IP range has {len(ip_range)}")
+            ips = _allocate(gtype, ip_range, count, taken)
+            for ip in ips:
+                taken.setdefault(ip, f"{group.get('naming_convention', gtype)} host")
+            if types and gtype not in [t.upper() for t in types]:
+                continue
             # Candidate datastores: "deploy_to_these_datastores" (list of indices) or the single legacy index
             ds_indices = group.get("deploy_to_these_datastores")
             if ds_indices is None:
@@ -119,7 +169,7 @@ def get_nested_esxi_specs(lab_spec, types=None):
             if disks[0] < 32:
                 raise EsxiBuildError("lab_spec", f"'{gtype}': harddisks[0] is the boot disk and must be >= 32 GB (is {disks[0]})")
             for n in range(count):
-                ip = ip_range[n]                                     # static IPs from this group's range, in order
+                ip = ips[n]                                          # MGT: range in order; others: next free IPs
                 dns_short = _dns_name_for_ip(lab_spec, ip)           # hostname = the FQDN Module 4 created for this IP
                 if not dns_short or not domain.get("name"):
                     raise EsxiBuildError("lab_spec", f"'{gtype}': {ip} has no FQDN from Module 4 (domain.fqdns range "
@@ -569,12 +619,34 @@ def _finish(spec):
             "ssl_thumbprint": thumb, "wait_s": round(time.time() - t0)}
 
 
+def _pings(ip):
+    try:
+        return subprocess.run(["ping", "-c", "2", "-W", "1", ip], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0
+    except FileNotFoundError:
+        return False  # no ping here: the plan-based IPAM check still applies
+
+
 def create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False):
     liblog.print_logs(f"Initiating create_nested_esxi_hosts(lab_spec, types={types}) function.")
     specs = get_nested_esxi_specs(lab_spec, types)
     if not specs:
         raise EsxiBuildError("lab_spec", f"no nested_esxi_servers match types={types}")
     isos, planned = {}, {}
+
+    # Phase 0 (--replace): delete every existing VM of this run first. IPAM can move a host to an address an old VM of
+    # the same group still holds, and the ping check below must only see machines that are not ours.
+    if replace_existing:
+        for spec in specs:
+            si = libubuntu._connect(spec)
+            try:
+                existing = libubuntu._find(libubuntu._locate(si, spec)["content"], vim.VirtualMachine, spec["name"])
+                if existing:
+                    liblog.print_logs(f"Deleting existing VM {spec['name']}.")
+                    libubuntu._destroy_vm(existing)
+            finally:
+                Disconnect(si)
+        time.sleep(5)
 
     # Phase 1 (sequential, a few seconds per host): ISO once, place, create VM, power on
     for spec in specs:
@@ -585,10 +657,10 @@ def create_nested_esxi_hosts(lab_spec, types=None, replace_existing=False):
             _check_portgroup(loc, spec)
             existing = libubuntu._find(loc["content"], vim.VirtualMachine, spec["name"])
             if existing:
-                if not replace_existing:
-                    raise EsxiBuildError("precheck", f"VM {spec['name']} already exists (use replace_existing=True)")
-                liblog.print_logs(f"Deleting existing VM {spec['name']}.")
-                libubuntu._destroy_vm(existing)
+                raise EsxiBuildError("precheck", f"VM {spec['name']} already exists (use replace_existing=True)")
+            if _pings(spec["ip"]):
+                raise EsxiBuildError("precheck", f"{spec['ip']} ({spec['fqdn']}) already answers ping with {spec['name']} "
+                                                 f"absent: another machine owns it. Free it or change the range")
             key = (spec["esxi_host"], spec["stock_iso"], spec["legacy_cpu"])
             if key not in isos:
                 isos[key] = _ensure_kickstart_iso(si, loc, spec)
