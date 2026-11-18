@@ -5,7 +5,8 @@
 #              Certificates, backups and encryption for the new vCenter/NSX come from Modules 10, 11 and 12.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (vMotion, vSAN and host TEP ranges on their own lab_spec networks: assign_ip_from_this_network)
+# Version: 1.2 (VI hosts get lab-CA certificates before commissioning, KB 415767)
+#         1.1 (vMotion, vSAN and host TEP ranges on their own lab_spec networks: assign_ip_from_this_network)
 #
 # IP plan: the workload domain vCenter, NSX VIP and NSX node(s) take the addresses right after the highest one already
 # allocated in the Module 4 DNS range of the management network (VCF management components, every nested ESXi host,
@@ -31,6 +32,7 @@ from python_lib import vmware as libvmw
 from python_lib import esxi as libesxi
 from python_lib import vcf as libvcf
 from python_lib import conjur as libconjur
+from python_lib import ca as libca
 
 # Import Standard Python Libraries
 import datetime
@@ -350,6 +352,66 @@ def ensure_network_pool(sddc, cfg):
     return p.get("id") or next(x["id"] for x in _elements(sddc.get("/v1/network-pools")) if x.get("name") == cfg["pool_name"])
 
 
+def _lab_ca_verified(h):
+    try:
+        return libca.served_chain_check(h["fqdn"]).get("verified", False)
+    except Exception:
+        return False
+
+
+def lab_ca_host_certificates(lab_spec, hosts, timeout_s=300):
+    """SDDC Manager only commissions hosts whose certificate it trusts once the management domain hosts carry external
+    certificates (Module 10), KB 415767. So each new host gets the lab CA chain in its trust store and a step-ca
+    certificate for its own CSR, the same way Module 10 rotated the management hosts. Hosts already on the lab CA are
+    left alone."""
+    from pyVim.connect import SmartConnect, Disconnect
+    from pyVmomi import vim
+    root, inter = (c.public_bytes(libca.serialization.Encoding.PEM).decode().strip() for c in libca._ca_chain())
+    for h in hosts:
+        if _lab_ca_verified(h):
+            liblog.print_logs(f"    {h['fqdn']}: certificate already from the lab CA.")
+            continue
+        liblog.print_logs(f"    {h['fqdn']}: replacing the self-signed certificate with a lab CA certificate (KB 415767).")
+        try:
+            si = SmartConnect(host=h["ip"], user="root", pwd=h["password"], sslContext=ssl._create_unverified_context())
+        except Exception as e:
+            raise WldError(f"{h['fqdn']}: cannot log in as root: {getattr(e, 'msg', None) or e}")
+        try:
+            view = si.content.viewManager.CreateContainerView(si.content.rootFolder, [vim.HostSystem], True)
+            host = view.view[0]
+            view.Destroy()
+            cm = host.configManager.certificateManager
+            try:
+                current = list(cm.ListCACertificates() or [])
+            except Exception:
+                current = []
+            norm = lambda p: "".join(p.split())
+            cas = current + [p for p in (root, inter) if norm(p) not in {norm(c) for c in current}]
+            cm.ReplaceCACertificatesAndCRLs(caCert=cas, caCrl=[])
+            csr = cm.GenerateCertificateSigningRequest(useIpAddressAsCommonName=False)
+            leaf, _, _ = libca.sign_csr(lab_spec, csr)
+            cm.InstallServerCertificate(cert=leaf)
+            try:
+                cm.NotifyAffectedServices()
+            except Exception:
+                pass  # deprecated on newer ESX; the services pick the certificate up on their own
+        except libca.CaError as e:
+            raise WldError(f"{h['fqdn']}: step-ca signing failed: {e}")
+        except Exception as e:
+            raise WldError(f"{h['fqdn']}: certificate replacement failed: {getattr(e, 'msg', None) or e}")
+        finally:
+            try:
+                Disconnect(si)
+            except Exception:
+                pass
+        deadline = time.time() + timeout_s
+        while not _lab_ca_verified(h):
+            if time.time() > deadline:
+                raise WldError(f"{h['fqdn']}: still not serving a lab CA certificate after {timeout_s}s")
+            time.sleep(10)
+        liblog.print_logs(f"    {h['fqdn']}: now serves a lab CA certificate (verifies to the lab root).")
+
+
 def _hosts_by_fqdn(sddc):
     return {h.get("fqdn", "").lower(): h for h in _elements(sddc.get("/v1/hosts"))}
 
@@ -367,6 +429,7 @@ def commission(lab_spec, name=None, sddc=None, cfg=None):
             k = known[h["fqdn"].lower()]
             liblog.print_logs(f"    {h['fqdn']}: already commissioned ({k.get('status')}).")
     if todo:
+        lab_ca_host_certificates(lab_spec, todo)
         specs = []
         for h in todo:
             ssl_tp, ssh_tp = libvcf._host_thumbprints(h)

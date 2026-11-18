@@ -301,10 +301,22 @@
         },
         "network_pool" : {
             "name" : "<sample: np-wld01>",
-            "vmotion" : {"assign_ip_from_this_network" : "<sample: 4 (lab_spec network index of the workload vMotion VLAN)>", "range_start" : "<sample: 10>", "range_end" : "<sample: 50>"},
-            "vsan" : {"assign_ip_from_this_network" : "<sample: 5 (workload vSAN VLAN)>", "range_start" : "<sample: 10>", "range_end" : "<sample: 50>"}
+            "vmotion" : {
+                "assign_ip_from_this_network" : "<sample: 4 (lab_spec network index of the workload vMotion VLAN)>", 
+                "range_start" : "<sample: 10>", 
+                "range_end" : "<sample: 50>"
+            },
+            "vsan" : {
+                "assign_ip_from_this_network" : "<sample: 5 (workload vSAN VLAN)>", 
+                "range_start" : "<sample: 10>", 
+                "range_end" : "<sample: 50>"
+            }
         },
-        "host_tep" : {"assign_ip_from_this_network" : "<sample: 6 (workload host TEP VLAN)>", "range_start" : "<sample: 10>", "range_end" : "<sample: 50>"},
+        "host_tep" : {
+            "assign_ip_from_this_network" : "<sample: 6 (workload host TEP VLAN)>", 
+            "range_start" : "<sample: 10>", 
+            "range_end" : "<sample: 50>"
+        },
         "storage_policy" : {
             "name" : "<sample: mpc-wld-r5>",
             "raid" : "RAID-5",
