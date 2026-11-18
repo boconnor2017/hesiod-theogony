@@ -289,5 +289,27 @@
                 "value" : "<sample: vcl>"
             }]
         }
-    }
+    },
+    "workload_domains" : [{
+        "name" : "<sample: wld01>",
+        "nested_esxi_type" : "VI",
+        "vsan_type" : "ESA",
+        "vcenter_size" : "small",
+        "nsx" : {
+            "count" : 1,
+            "size" : "medium"
+        },
+        "network_pool" : {
+            "name" : "<sample: np-wld01>",
+            "vmotion" : {"range_start" : "<sample: 51 (outside vcf.networks.vmotion range)>", "range_end" : "<sample: 59>"},
+            "vsan" : {"range_start" : "<sample: 101 (outside vcf.networks.vsan range)>", "range_end" : "<sample: 109>"}
+        },
+        "host_tep" : {"range_start" : "<sample: 151 (outside vcf.networks.host_tep range)>", "range_end" : "<sample: 170>"},
+        "storage_policy" : {
+            "name" : "<sample: mpc-wld-r5>",
+            "raid" : "RAID-5",
+            "failures_to_tolerate" : 1
+        },
+        "cluster_image" : "<optional: SDDC Manager image name; only needed when there is more than one>"
+    }]
 }

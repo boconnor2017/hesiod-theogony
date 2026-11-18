@@ -10,7 +10,8 @@
 #              Replaces hesiod-vcf9 module 4 (pcli_create_vm_from_iso + Set-VMKeystrokes + pcli_prep_esxi_hosts_for_VCF).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.9 (IPAM: VI/other non-MGT hosts skip IPs Module 8 allocates to VCF components and pools, and any IP that
+# Version: 1.10 (IPAM also skips workload domain vCenter/NSX addresses recorded by Module 14)
+#         1.9 (IPAM: VI/other non-MGT hosts skip IPs Module 8 allocates to VCF components and pools, and any IP that
 #              already answers ping, so a VI host can no longer take e.g. the VCF Automation platform address)
 #
 # Public functions
@@ -109,6 +110,9 @@ def _reserved_ips(lab_spec):
             reserved[f["ip"]] = f"{entry['component']} {label} ({f['fqdn']})"
         for ip in entry["pool"]:
             reserved[ip] = f"{entry['component']} IP pool"
+    from python_lib import wld as libwld  # workload domain vCenter/NSX addresses recorded by Module 14
+    for ip, owner in libwld.recorded_ips().items():
+        reserved.setdefault(ip, owner)
     return reserved
 
 
