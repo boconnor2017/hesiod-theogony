@@ -45,7 +45,7 @@ Using the **Hesiod Main Appliance**, select from the list of modules below and p
 | Getting Started | Hesiod Main Appiance needs to be deployed.|
 
 ### Manual Process
-Use the instructions from [lab_spec.json Instructions](../hesiod-theogony/docs/json_lib.md) to create your first `conf/lab_spec.json` file. 
+Use the instructions from [lab_spec.json Instructions](https://github.com/boconnor2017/hesiod-theogony/blob/main/docs/json_lib.md) to create your first `conf/lab_spec.json` file. 
 
 ### Prompted/Automated Process
 *Coming Soon: a CLI prompt questionnaire to help you create your first conf/lab_spec.json configuration file.*
