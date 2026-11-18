@@ -5,7 +5,8 @@
 #              Certificates, backups and encryption for the new vCenter/NSX come from Modules 10, 11 and 12.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (VI hosts get lab-CA certificates before commissioning, KB 415767)
+# Version: 1.3 (own SSO domain per workload domain: VCF 9 has no ELM join; NSX network profile for the uplink profile)
+#         1.2 (VI hosts get lab-CA certificates before commissioning, KB 415767)
 #         1.1 (vMotion, vSAN and host TEP ranges on their own lab_spec networks: assign_ip_from_this_network)
 #
 # IP plan: the workload domain vCenter, NSX VIP and NSX node(s) take the addresses right after the highest one already
@@ -188,6 +189,10 @@ def wld_settings(lab_spec, name=None):
     pw = lab_spec["authentication"][vcf["use_these_credentials"]]["password"]
     pool = w.get("network_pool", {})
     sp = w.get("storage_policy", {})
+    # VCF 9 workload domains get their own vCenter SSO domain (joining the management domain's ELM ring is not
+    # supported); VCF SSO / the Identity Broker is what spans domains.
+    sso = str(w.get("sso_domain") or "").strip()
+    sso = f"{w['name']}.local" if not sso or sso.startswith("<") else sso
     nets = [_network(lab_spec, "vmotion", pool.get("vmotion"), "network_pool.vmotion"),
             _network(lab_spec, "vsan", pool.get("vsan"), "network_pool.vsan"),
             _network(lab_spec, "host_tep", w.get("host_tep"), "host_tep")]
@@ -210,6 +215,7 @@ def wld_settings(lab_spec, name=None):
         "policy": {"name": sp.get("name", f"{w['name']}-r5"), "ftt": int(sp.get("failures_to_tolerate", 1)),
                    "raid5": str(sp.get("raid", "RAID-5")).upper().startswith("RAID-5")},
         "password": pw, "root": names["root"],
+        "sso_domain": sso, "sso_user": f"administrator@{sso}",
     }
 
 
@@ -237,6 +243,7 @@ def _print_plan(cfg):
     for k, label in (("vmotion", "vMotion"), ("vsan", "vSAN"), ("tep", "host TEP")):
         n = cfg[k]
         liblog.print_logs(f"    {label:14} VLAN {n['vlan']:<5} {n['subnet']:18} {n['range'][0]} - {n['range'][-1]}")
+    liblog.print_logs(f"    vCenter SSO domain {cfg['sso_domain']} (log in as {cfg['sso_user']})")
     liblog.print_logs(f"    Network pool {cfg['pool_name']}; default storage policy {cfg['policy']['name']} "
                       f"({'RAID-5' if cfg['policy']['raid5'] else 'RAID-1'}, FTT={cfg['policy']['ftt']})")
 
@@ -366,7 +373,10 @@ def lab_ca_host_certificates(lab_spec, hosts, timeout_s=300):
     left alone."""
     from pyVim.connect import SmartConnect, Disconnect
     from pyVmomi import vim
-    root, inter = (c.public_bytes(libca.serialization.Encoding.PEM).decode().strip() for c in libca._ca_chain())
+    try:
+        root, inter = (c.public_bytes(libca.serialization.Encoding.PEM).decode().strip() for c in libca._ca_chain())
+    except libca.CaError as e:
+        raise WldError(str(e))
     for h in hosts:
         if _lab_ca_verified(h):
             liblog.print_logs(f"    {h['fqdn']}: certificate already from the lab CA.")
@@ -412,6 +422,28 @@ def lab_ca_host_certificates(lab_spec, hosts, timeout_s=300):
         liblog.print_logs(f"    {h['fqdn']}: now serves a lab CA certificate (verifies to the lab root).")
 
 
+def ensure_ssh(hosts):
+    """Commissioning reads each host's SSH thumbprint, so SSH (TSM-SSH) must be running. Started, never re-enabled
+    at boot here (the SCG esx-9.ssh exception covers the lab)."""
+    from pyVim.connect import SmartConnect, Disconnect
+    from pyVmomi import vim
+    for h in hosts:
+        try:
+            si = SmartConnect(host=h["ip"], user="root", pwd=h["password"], sslContext=ssl._create_unverified_context())
+        except Exception as e:
+            raise WldError(f"{h['fqdn']}: cannot log in as root: {getattr(e, 'msg', None) or e}")
+        try:
+            view = si.content.viewManager.CreateContainerView(si.content.rootFolder, [vim.HostSystem], True)
+            ss = view.view[0].configManager.serviceSystem
+            view.Destroy()
+            svc = next((x for x in ss.serviceInfo.service if x.key == "TSM-SSH"), None)
+            if svc and not svc.running:
+                ss.StartService(id="TSM-SSH")
+                liblog.print_logs(f"    {h['fqdn']}: started SSH (needed for its SSH thumbprint).")
+        finally:
+            Disconnect(si)
+
+
 def _hosts_by_fqdn(sddc):
     return {h.get("fqdn", "").lower(): h for h in _elements(sddc.get("/v1/hosts"))}
 
@@ -429,6 +461,7 @@ def commission(lab_spec, name=None, sddc=None, cfg=None):
             k = known[h["fqdn"].lower()]
             liblog.print_logs(f"    {h['fqdn']}: already commissioned ({k.get('status')}).")
     if todo:
+        ensure_ssh(todo)
         lab_ca_host_certificates(lab_spec, todo)
         specs = []
         for h in todo:
@@ -476,8 +509,11 @@ def render_domain_spec(lab_spec, cfg, host_ids, sddc=None):
 
     def nd(x):
         return {"ipAddress": x["ip"], "dnsName": x["fqdn"], "gateway": mgmt["gateway"], "subnetMask": mgmt["mask"]}
-    uplinks = [f"uplink{i + 1}" for i in range(len(cfg["vmnics"]))]
-    host_specs = [{"id": h["id"], "hostNetworkSpec": {"vmNics": [{"id": v, "vdsName": cfg["vds"], "uplink": u}
+    uplinks = [f"uplink{i + 1}" for i in range(len(cfg["vmnics"]))]       # VDS uplinks
+    nsx_uplinks = [f"uplink-{i + 1}" for i in range(len(cfg["vmnics"]))]  # NSX uplink profile uplinks
+    profile = f"{cfg['cluster']}-network-profile"
+    host_specs = [{"id": h["id"], "hostNetworkSpec": {"networkProfileName": profile,
+                                                      "vmNics": [{"id": v, "vdsName": cfg["vds"], "uplink": u}
                                                                  for v, u in zip(cfg["vmnics"], uplinks)]}}
                   for h in host_ids]
     pg = lambda role, t: {"name": f"{cfg['vds']}-pg-{role}", "transportType": t, "activeUplinks": uplinks,
@@ -499,9 +535,17 @@ def render_domain_spec(lab_spec, cfg, host_ids, sddc=None):
                     {"name": f"{cfg['root']}-{cfg['name']}-overlay-tz", "transportType": "OVERLAY"},
                     {"name": f"{cfg['root']}-{cfg['name']}-vlan-tz", "transportType": "VLAN"}],
                     "hostSwitchOperationalMode": "STANDARD"}}],
+            # The uplink profile is only used through a network profile that ties it to the VDS and the TEP pool
+            "networkProfiles": [{"name": profile, "description": f"{cfg['cluster']} NSX host switch",
+                                 "isDefault": True,
+                                 "nsxtHostSwitchConfigs": [{
+                                     "vdsName": cfg["vds"], "uplinkProfileName": f"{cfg['cluster']}-uplink-profile",
+                                     "ipAddressPoolName": f"{cfg['cluster']}-tep01",
+                                     "vdsUplinkToNsxUplink": [{"vdsUplinkName": u, "nsxUplinkName": n}
+                                                              for u, n in zip(uplinks, nsx_uplinks)]}]}],
             "nsxClusterSpec": {"nsxTClusterSpec": {
                 "uplinkProfiles": [{"name": f"{cfg['cluster']}-uplink-profile", "transportVlan": tep["vlan"],
-                                    "teamings": [{"policy": "LOADBALANCE_SRCID", "activeUplinks": uplinks,
+                                    "teamings": [{"policy": "LOADBALANCE_SRCID", "activeUplinks": nsx_uplinks,
                                                   "standByUplinks": []}]}],
                 "ipAddressPoolsSpec": [{"name": f"{cfg['cluster']}-tep01",
                                         "description": f"{cfg['cluster']} host TEP pool",
@@ -525,6 +569,7 @@ def render_domain_spec(lab_spec, cfg, host_ids, sddc=None):
                      "vip": a["nsx_vip"]["ip"], "vipFqdn": a["nsx_vip"]["fqdn"], "formFactor": cfg["nsx_size"],
                      "nsxManagerAdminPassword": cfg["password"], "nsxManagerRootPassword": cfg["password"],
                      "nsxManagerAuditPassword": cfg["password"]},
+        "ssoDomainSpec": {"ssoDomainName": cfg["sso_domain"], "ssoDomainPassword": cfg["password"]},
         "deployWithoutLicenseKeys": True,
     }
 
@@ -656,7 +701,7 @@ def retry(lab_spec, name=None):
 def _vc_connect(cfg):
     from pyVim.connect import SmartConnect
     try:
-        return SmartConnect(host=cfg["addresses"]["vcenter"]["fqdn"], user="administrator@vsphere.local",
+        return SmartConnect(host=cfg["addresses"]["vcenter"]["fqdn"], user=cfg["sso_user"],
                             pwd=cfg["password"], sslContext=ssl._create_unverified_context())
     except Exception as e:
         raise WldError(f"cannot log in to {cfg['addresses']['vcenter']['fqdn']}: {getattr(e, 'msg', None) or e}")
