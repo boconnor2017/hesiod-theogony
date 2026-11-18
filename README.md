@@ -1,214 +1,121 @@
 # Hesiod Theogony
 ![img01](img_lib/theogony.png)   
-This is a branch from Project Hesiod: https://github.com/boconnor2017/hesiod. **Theogony** is an ancient Greek poem by Hesiod that details the origins of the gods, the creation of the universe, and serves as a foundational text for Greek Mythology. As such the contents of this repository represent the foundational codebase for a VMware based home lab. 
+**Theogony** is an ancient Greek poem by Hesiod that details the origins of the gods, the creation of the universe, and serves as a foundational text for Greek Mythology. As such the contents of this repository represent the foundational codebase for a VMware based home lab. 
 
 # Prerequisites
-* At least one physical server running ESXi 9
-* A router (virtual or physical) where you can create subnets and BGP peering
-* Appropriate access and entitlements to Broadcom software
-
-| Module         | Prerequisite                     | Resource Requirements         |
-|----------------|----------------------------------|-------------------------------|
-| Quick Start    | 1x Physical server and 1x Subnet | (see physical server specs below) | 
-| Module 1       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 2       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 3       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 4       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 5       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 6       | (Same as Quick Start)            | (see virtual server specs below)  |
-| Module 7       | VCF 9.1.1 binaries from Broadcom | (see Broadcom specs below)  |
-
-## Physical Server Specs
-
-
-## Virtual Server Specs
-| Component                | vCPU | vMemory (GB) | vStorage (GB) |
-|--------------------------|------|--------------|---------------|
-| Hesiod Main Appliance    | 4    | 16           | 100           |
-| Hesiod K8 Cluster Master | 4    | 16           | 100           |
-| Hesiod K8 Cluster Node 1 | 4    | 16           | 100           |
-| VCF Installer            | 4    | 16           | 914           |
-| Nested ESXi Host 1       | 40   | 320          | 1080          |
-| Nested ESXi Host 2       | 40   | 320          | 1080          |
-| Nested ESXi Host 3       | 40   | 320          | 1080          |
-| Nested ESXi Host 4       | 40   | 320          | 1080          |
-| Nested ESXi Host 5       | 40   | 320          | 1080          |
-| TOTAL:                   | 40   | 1664         | 6614          |
-
-## Broadcom Specs
-|Component            | Type | Module |
-|---------------------|------|--------|
-| ESXi 9.1.1          | ISO  | 7      |
-| VCF 9.1.1 Installer | OVA  | 8      |
+* At least one physical server running ESXi 9.
+* A router (virtual or physical) where you can create subnets and BGP peering.
+* Appropriate access and entitlements to Broadcom software.
+* Open source Ubuntu ISO.
 
 # Architecture Summary
 ![img02](img_lib/architecture_summary.png)
 
-# Quick Start: Deploy Hesiod Main Appliance
-Step 1: Deploy Ubuntu 64-bit Server with OpenSSH enabled. Login to the OS with SSH.   
+# Getting Started: Deploy a Hesiod Main Appliance
+The `Hesiod Main` appliance is the primary orchestrator for the modules below. Each module corresponds to a critical capability needed to run a VMware home lab. Jump access to and from the home lab (VPN, RDP, etc) is out of scope for this project. Start by deploying an Ubuntu server to your physical ESXi host using an open source ISO. Ensure OpenSSH is enabled. Once deployed, SSH into the Ubuntu Server and run the following **in order** to initialize the `hesiod-theogony` orchestrator.
 
-Step 2: Download the `prep-ubuntu` bash script. 
+Download the `prep-ubuntu` bash script. 
 ```
 sudo curl https://raw.githubusercontent.com/boconnor2017/hesiod-theogony/refs/heads/main/ubuntu/prep-ubuntu.sh >> prep-ubuntu.sh
 ```
 
-Step 3: Run the `prep-ubuntu` bash script.
+Run the `prep-ubuntu` bash script.
 ```
 sudo sh prep-ubuntu.sh
 ```
 
-Step 4: Navigate to `/usr/local/hesiod-theogony` working directory.
+Navigate to `/usr/local/hesiod-theogony` working directory.
 ```
 cd /usr/local/hesiod-theogony
 ```
 
-Step 5: Run `hesiod-theogony` python script using the `-init` parameter. This will initialize the Theogony modules below with necessary python packages.
+Run `hesiod-theogony` python script using the `-init` parameter. This will initialize the Theogony modules below with necessary python packages.
 ```
 sudo python3 hesiod-theogony.py -init
 ```   
 
-You have now deployed the **Hesiod Main Appliance**. Run `sudo python3 hesiod-theogony.py --help` for details.
+You have now deployed the **Hesiod Main Appliance**. Run `sudo python3 hesiod-theogony.py --help` for details on CLI commands. Use this program to orchestrate the modules below.
 
 # Modules: Deploy a VMware Lab Environment
-Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly.
+Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly. The source of all configuration details is a file `lab_spec.json` that is stored in the `conf/` folder. **WARNING: Do not edit or remove any of the files in /json_lib. Copy only. Do not edit or remove any of the files in /conf other than lab_spec.json as these are used throughout each module.**
 
-## Module 1: Create Lab Spec JSON files (Coming Soon...)
-The `lab_spec.json` file contains the specs for your home lab. Specs include physical network configurations, physical host configurations, storage configurations, credentials, etc. Blank json templates are stored in the `/json_lib` folder. This script will generate a copy and will prompt you for inputs. Configurations are stored in the `/conf` folder. If you prefer to generate your own json file, copy `/json_lib/lab_spec.json`, paste into `/conf/lab_spec.json` and edit directly using vi editor. Alternatively, if you've created one already, simply upload it to `/conf/lab_spec.json`.    
+## Module 1: Create Lab Spec JSON files 
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Getting Started | Hesiod Main Appiance needs to be deployed. |
 
-The `dns_spec.json` file contains the dns specs for a brand new DNS server that you can deploy as part of Module 3. Blank json templates are stored in the `/json_lib` folder. This script will generate a copy and will prompt you for inputs. Configurations are stored in the `/conf` folder. If you prefer to generate your own json file, copy `/json_lib/dns_spec.json`, paste into `/conf/dns_spec.json` and edit directly using vi editor. Alternatively, if you've created one already, simply upload it to `/conf/dns_spec.json`.    
-
-**WARNING: Do not edit or remove any of the files in /json_lib. Copy only.**
+*Coming Soon: a CLI prompt questionnaire to help you create your first conf/lab_spec.json configuration file.*
 ```
 sudo python3 hesiod-theogony.py -m1
 ```  
 
 ## Module 2: Deploy Hesiod Kubernetes Services (HKS)
-The Hesiod Kubernetes Services are used to host external services needed to run your nested VCF environment. External services include: DNS, LDAPS, offline depots, etc. The Hesiod Main Appliance will interact with your physical ESXi host(s) using details from **Module 1** to build virtual machines running Ubuntu Servers with Kubernetes. 
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+
+The Hesiod Kubernetes Services are used to host shared services (DNS, LDAP, Password Vault, CA, KMS, etc) for your nested VCF environment. External services include: DNS, LDAPS, offline depots, etc. This script uses the configuration from `lab_spec.json` to deploy Kubernetes on Ubuntu. 
 ```
 sudo python3 hesiod-theogony.py -m2
 ```  
 
 ## Module 3: Deploy Technitium DNS Server
-A DNS server is required for your VMware environment. This script uses the configuration from `lab_spec.json` in Module 1 to deploy a Technitium Server pod on the HKS cluster from Module 2. Specifically:
-```
-"domain" : {
-        "name" : "<sample: hesiod.local>",
-        "server_ips" : ["<sample: 10.0.1.9", "8.8.8.8"],
-        "ntp" : "pool.ntp.org",
-        "fqdns" : [{
-            "naming_convention" : "<sample: hesvcf>",
-            "assign_ip_from_this_network" : 1, 
-            "assign_ip_from_this_range_start" : "9",
-            "assign_ip_from_this_range_end" : "60"
-        }]
-    }
-```
-The first IP address in `assign_ip_from_this_range_start` is reserved for the Technitium DNS server. This IP address is used by MetalLb to expose the `server_ips`[0] IP address that differs from the Kubernetes node.  
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to deploy a Technitium Server pod on the HKS cluster from Module 2. 
 ```
 sudo python3 hesiod-theogony.py -m3
 ```    
-You can connect to your Technitium DNS server at http://<DNS Server IP Address>:5380
+You can connect to your Technitium DNS server at `http://<DNS Server IP Address>:5380`
 
 ## Module 4: Create DNS Zone and FQDNs for VCF
-This script uses the configuration from `lab_spec.json` in Module 1 to create a DNS zone on the Technitium server deployed in Module 3. Specifically:
-```
-"domain" : {
-        "name" : "<sample: hesiod.local>",
-        "server_ips" : ["<sample: 10.0.1.9", "8.8.8.8"],
-        "ntp" : "pool.ntp.org",
-        "fqdns" : [{
-            "naming_convention" : "<sample: hesvcf>",
-            "assign_ip_from_this_network" : 1, 
-            "assign_ip_from_this_range_start" : "9",
-            "assign_ip_from_this_range_end" : "60"
-        }]
-    }
-```
-The first IP address in `assign_ip_from_this_range_start` is reserved for the Technitium DNS server. This IP address is used by MetalLb to expose the `server_ips`[0] IP address that differs from the Kubernetes node. The remaining addresses in the range will be used for the FQDNs. The FQDN is generated automatically using the naming convention and appending a counter with the zone name. For example, in the example above the first FQDN would be `hesvcf01.hesiod.local`, the second `hesvcf02.hesiod.local` and so on until the last IP address from `assign_ip_from_this_range_end` has been assigned.    
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
 
-You can run this script as many times as you like. Each time the zone and the previous FQDNs will be overwritten. 
+This script uses the configuration from `lab_spec.json` in Module 1 to create a DNS zone on the Technitium server deployed in Module 3. You can run this script as many times as you like. Each time the zone and the previous FQDNs will be repaved with the most up to date values from `/conf/lab_spec.json`. 
 ```
 sudo python3 hesiod-theogony.py -m4
 ```   
 
 ## Module 5: Deploy LLDAP Server
-An LDAP server is recommended but not required for your VMware environment. This script uses the configuration from `lab_spec.json` in Module 1 to deploy a LLDAP Server pod on the HKS cluster from Module 2. Specifically:
-```
-"lldap" : {
-        "hostname" : "<sample: ldap>",
-        "ip_address" : "<sample: 10.0.1.8>",
-        "use_these_credentials" : 0
-    },
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
 
-```
-
-
-You can run this script as many times as you like. Each time the LLDAP Server will be redeployed on HKS. 
+This script uses the configuration from `lab_spec.json` in Module 1 to deploy a LLDAP Server pod on the HKS cluster from Module 2. You can run this script as many times as you like. Each time the LLDAP Server will be redeployed on HKS. 
 ```
 sudo python3 hesiod-theogony.py -m5
 ```   
 
 ## Module 6: Create LDAP Groups and Users
-This script uses the configuration from `lab_spec.json` in Module 1 to create LDAP Groups and LDAP Users for your VMware environment.
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 5     | LLDAP needs to be running and available.      |
 
-```
-"ldap" : {
-    "groups" : [{
-        "name" : "<sample: group_01>"
-    }],
-    "users" : [{
-        "username" : "<sample: user_01>",
-        "display_name" : "",
-        "first_name" : "",
-        "last_name" : "",
-        "email" : "<sample: user_01@hesiod.local",
-        "password" :"<sample: VMware123!>",
-        "add_to_these_groups" : [0]
-        }]
-    }
-```
-
-You can run this script as many times as you like. Each time the AD Groups and Users will be overwritten in LLDAP. 
+This script uses the configuration from `lab_spec.json` in Module 1 to create LDAP Groups and LDAP Users on the LLDAP server deployed in Module 5. You can run this script as many times as you like. Each time the AD Groups and Users will be repaved with the most up to date values from `/conf/lab_spec.json`. 
 ```
 sudo python3 hesiod-theogony.py -m6
 ```  
 
 ## Module 7: Deploy Nested ESXi Hosts
-This script uses the configuration from `lab_spec.json` in Module 1 to build a group of VCF-Ready nested ESXi hosts using the ESXi ISO. 
-```
-"nested_esxi_servers" : [{
-        "nested_esxi_type" : "<Select: MGT|VI >",
-        "deploy_this_many" : 5,
-        "naming_convention" : "<Sample: hesvcf-esx>",
-        "use_these_credentials" : 2,
-        "assign_ip_from_this_network" : 1, 
-        "assign_ip_from_this_range_start" : "20",
-        "assign_ip_from_this_range_end" : "28",
-        "management_vlan_id" : "<Sample: 1610 (0 = untagged)>",
-        "mtu" : "9000",
-        "numCPU" : "40",
-        "expose_hw_virt_to_guest" : "yes",
-        "allow_legacy_cpu" : "<Select: yes|no (yes for CPUs ESXi 9 lists as deprecated, e.g. Skylake)>",
-        "memoryGB" : "320",
-        "numNIC" : "2",
-        "harddisks" : [{
-            "storage_GB" : "60"
-        },
-        {
-            "storage_GB" : "16"
-        },
-        {
-            "storage_GB" : "1024"
-        }],
-        "CD_path" : "[datastore1] ISO/VMware-ESXi-9.1.iso",
-        "deploy_to_this_physical_host" : 0,
-        "deploy_to_this_network" : 0,
-        "deploy_to_this_datastore" : 0
-    }]
-```
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| ESXi ISO     | The ESXi ISO needs to be uploaded to a datastore on your physical host. |
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 4     | DNS Entries need to be completed.            |
 
-
-Run the following **AFTER you have uploaded the ESXi ISO to a datastore on the Physical Server**. Use additional parameters `MGT` to build management servers, `VI` to build workload servers, and `--replace` to replace existing servers.
+This script uses the configuration from `lab_spec.json` in Module 1 to build a group of VCF-Ready nested ESXi hosts using the ESXi ISO. Run the following **AFTER you have uploaded the ESXi ISO to a datastore on the Physical Server**. Use additional parameters `MGT` to build management servers, `VI` to build workload servers, and `--replace` to replace existing servers with a new configuration in `/conf/lab_spec.json`.
 
 ```
 sudo python3 hesiod-theogony.py -m7 MGT
@@ -219,67 +126,27 @@ To deploy nested hosts for VI, run the following.
 sudo python3 hesiod-theogony.py -m7 VI
 ```  
 
-To replace existing hosts, run the following.
+To replace existing management hosts, run the following.
 ```
-sudo python3 hesiod-theogony.py -m7 --replace
+sudo python3 hesiod-theogony.py -m7 MGT --replace
+```  
+To replace existing management hosts, run the following.
+```
+sudo python3 hesiod-theogony.py -m7 VI --replace
 ```  
 
 ## Module 8: Deploy VCF Fleet Management Domain
-This script uses the configuration from `lab_spec.json` in Module 1 to build a VCF Fleet Management Domain. 
-```
-"vcf" : {
-    "version" : "9.1.1.0",
-    "use_these_credentials" : 4,
-    "installer" : {
-        "ip_address" : "<sample: 10.0.2.15 (between ubuntu_servers range_end and nested_esxi_servers range_start)>",
-        "use_these_credentials" : 3
-    },
-    "networks" : {
-        "management" : 1,
-        "vm_management" : 1,
-        "vmotion" : { "network" : 3, "range_start" : "10", "range_end" : "50" },
-        "vsan" : { "network" : 3, "range_start" : "60", "range_end" : "100" },
-        "host_tep" : { "network" : 3, "range_start" : "110", "range_end" : "150" }
-    },
-    "components" : [
-        { "name" : "vcenter", "size" : "small" },
-        { "name" : "sddc_manager" },
-        { "name" : "nsx", "count" : 1, "size" : "medium" },
-        { "name" : "vcf_operations", "count" : 1, "size" : "small" },
-        { "name" : "vcf_operations_collector", "size" : "small" },
-        { "name" : "vsp", "size" : "small", "pool_size" : 12 },
-        { "name" : "vidb" },
-        { "name" : "license_server" },
-        { "name" : "fleet_lcm" },
-        { "name" : "sddc_lcm" },
-        { "name" : "vcf_automation", "size" : "small", "pool_size" : 5 }
-    ],
-    "cluster" : {
-        "vsan_type" : "<Select: OSA|ESA>",
-        "failures_to_tolerate" : 1,
-        "vmnics" : ["vmnic0", "vmnic1"]
-    },
-    "naming_convention" : {
-        "root" : "<sample: vcf>",
-        "object" : [{
-            "name" : "datacenter",
-            "value" : "<sample: dc>"
-        },
-        {
-            "name" : "management-cluster",
-            "value" : "<sample: mcl>"
-        },
-        {
-            "name" : "vi-cluster",
-            "value" : "<sample: vcl>"
-        }]
-    }
-}
-```
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 4     | DNS Entries need to be completed.            |
+| Module 5     | LLDAP needs to be running and available.     |
+| Module 6     | LDAP Users and Groups need to be completed.  |
+| Module 7 (MGT) | Nested ESXi hosts (recommended: 5) need to be deployed.  |
 
-Run the following **AFTER you have manually deployed the VCF Installer**. Use additional parameters `--deploy` to run the installation or `--retry` to continue an installation after a failure. Without these parameters this module will stop at the precheck. Detailed results of the precheck are stored in `/conf/vcf_management_domain_validation.json`.
+This script uses the configuration from `lab_spec.json` in Module 1 to deploy a VCF Fleet. Run the following **AFTER you have manually deployed the VCF Installer**. Use additional parameters `--deploy` to run the installation or `--retry` to continue an installation after a failure. Without these parameters this module will stop at the precheck. Detailed results of the precheck are stored in `/conf/vcf_management_domain_validation.json`. *Note: its normal for this process to take several hours.*
 
-Precheck.
+Precheck only.
 ```
 sudo python3 hesiod-theogony.py -m8
 ``` 
@@ -294,26 +161,17 @@ Retry after a failure.
 sudo python3 hesiod-theogony.py -m8 --retry
 ``` 
 
-Check on status. Note: its normal for this process to take several hours.
+Check on status. 
 ```
 sudo python3 hesiod-theogony.py -m8 --status
 ``` 
 
 ## Module 9: Deploy a CyberArk Conjur OSS Server on HKS
-This script uses the configuration from `lab_spec.json` in Module 1 to build a `conjur-oss` kubernetes pod on HKS from Module 2. This script will automatically query the SDDC Manager from Module 8, will pull passwords, and will store them in the password vault. 
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 8     | VCF Fleet is deployed.                       |
 
-```
-"conjur" : {
-    "hostname" : "<sample: conjur>",
-    "ip_address" : "<sample: 10.0.1.7>",
-    "account" : "<sample: hesiod>",
-    "use_these_credentials" : 5,
-    "node" : "<optional: HKS node that holds the vault database; delete this line to use the first Ready worker>",
-    "data_path" : "/var/lib/hesiod/conjur/pgdata"
-    }
-```
-
-Use additional parameters `--report` to generate a markdown file containing readiness of the password vault and available passwords.
+This script uses the configuration from `lab_spec.json` in Module 1 to build a `conjur-oss` kubernetes pod on HKS from Module 2. This script will automatically query the SDDC Manager from Module 8, will pull passwords, and will store them in the password vault. Use additional parameters `--report` to generate a markdown file containing readiness of the password vault and available passwords.
 
 Deploy Conjur, query SDDC Manager, store passwords in vault.
 ```
@@ -326,30 +184,11 @@ sudo python3 hesiod-theogony.py -m9 --report
 ``` 
 
 ## Module 10: Deploy a Certificate Authority and Rotate Certs
-This script uses the configuration from `lab_spec.json` in Module 1 to build a `step-ca` Kubernetes pod on HKS from Module 2 and rotates certificates using SDDC Manager from Module 8.
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 8     | VCF Fleet is deployed.                       |
 
-```
-"certificate_authority" : {
-    "hostname" : "<sample: ca>",
-    "ip_address" : "<sample: 10.0.1.6>",
-    "name" : "<sample: Hesiod Lab CA>",
-    "key_size" : 4096,
-    "leaf_validity_days" : 365,
-    "renew_within_days" : 30,
-    "rotate_types" : ["VCENTER", "NSXT_MANAGER", "ESXI", "SDDC_MANAGER"],
-    "csr" : {
-        "country" : "<sample: US>",
-        "state" : "<sample: Virginia>",
-        "locality" : "<sample: Reston>",
-        "organization" : "<sample: Hesiod>",
-        "organizationUnit" : "<sample: MPC>"
-    },
-    "node" : "<optional: HKS node that holds the CA data; delete this line to use the first Ready worker>",
-    "data_path" : "/var/lib/hesiod/step-ca"
-    }
-```
-
-**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+This script uses the configuration from `lab_spec.json` in Module 1 to build a `step-ca` Kubernetes pod on HKS from Module 2 and rotates certificates using SDDC Manager from Module 8. **IMPORTANT: Run each script below in the following order and ensure results are successful before proceeding to the next.**
 
 Deploy Certificate Authority
 ```
@@ -369,29 +208,11 @@ sudo python3 hesiod-theogony.py -m10 --report
 ``` 
 
 ## Module 11: Deploy an SFTP Server and Configure Backups
-This script uses the configuration from `lab_spec.json` in Module 1 to build a lightweight sftp Kubernetes pod on HKS from Module 2 and configures backups for components deployed in Module 8.
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 8     | VCF Fleet is deployed.                       |
 
-```
-"backup" : {
-    "hostname" : "<sample: sftp>",
-    "ip_address" : "<sample: 10.0.1.5>",
-    "username" : "svc-vcf-backup",
-    "use_these_credentials" : 6,
-    "passphrase_credentials" : 7,
-    "directory" : "/backup/vcf",
-    "vcf_uses_fqdn" : true,
-    "schedule" : {
-        "hour" : 2,
-        "minute" : 0,
-        "vcenter_minute" : 15,
-        "retain" : 7
-    },
-    "node" : "<optional: HKS node that holds the backups; delete this line to use the first Ready worker>",
-    "data_path" : "/var/lib/hesiod/sftp"
-    }
-```
-
-**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+This script uses the configuration from `lab_spec.json` in Module 1 to build a lightweight `sftp` Kubernetes pod on HKS from Module 2 and configures backups for components deployed in Module 8. **IMPORTANT: Run each script below in the following order and ensure results are successful before proceeding to the next.**
 
 Deploy SFTP server.
 ```
@@ -415,24 +236,12 @@ sudo python3 hesiod-theogony.py -m11 --report
 ``` 
 
 ## Module 12: Deploy a KMS Server and Encrypt vSAN
-This script uses the configuration from `lab_spec.json` in Module 1 to build a Key Management Server Kubernetes pod on HKS from Module 2 and configures data in motion and data at rest encryption on vSAN clusters deployed in Module 8.
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 8     | VCF Fleet is deployed.                       |
+| Module 9     | Password Vault is configured and available.  |
 
-```
-"key_management" : {
-    "hostname" : "<sample: kmip>",
-    "ip_address" : "<sample: 10.0.1.3>",
-    "provider_name" : "<sample: kms-vcf>",
-    "server_name" : "kmip01",
-    "set_default" : true,
-    "cluster" : "<optional: vSAN cluster name; delete this line to use the management cluster from vcf.naming_convention>",
-    "allow_reduced_redundancy" : false,
-    "dit_rekey_minutes" : 1440,
-    "node" : "<optional: HKS node that holds the key database; delete this line to use the first Ready worker>",
-    "data_path" : "/var/lib/hesiod/kmip"
-    }
-```
-
-**IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
+This script uses the configuration from `lab_spec.json` in Module 1 to build a Key Management Server Kubernetes pod on HKS from Module 2 and configures data in motion and data at rest encryption on vSAN clusters deployed in Module 8. Secrets are stored in the password vault from Module 9. **IMPORTANT: Run each script in order and ensure results are successful before proceeding to the next.**
 
 Deploy KMS server.
 ```
@@ -457,4 +266,84 @@ sudo python3 hesiod-theogony.py -m12 --backup-keys
 Generate a markdown file showing readiness of vSAN Encryption.
 ```
 sudo python3 hesiod-theogony.py -m12 --report
+``` 
+
+# Module 13: Audit the Management Domain against the VCF 9.1 Security Compliance Guide
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 8     | VCF Fleet is deployed.                       |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and performs a series of PowerCLI checks against [Broadcom's VCF 9.1 Security and Compliance Guide (Github)](https://github.com/vmware/vcf-security-and-compliance-guidelines) which is based on [Broadcom's VCF 9.1 Security and Compliance Guide (TechDocs)](https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/security-and-compliance.html). Use additional parameters `--setup` to install PowerShell prerequisites on the Hesiod Main Appliance, `--report` to build a markdown report from the last audit, and `--remediate` to programatically configure the VCF Fleet so it meets compliance thresholds. **IMPORTANT: making changes to the environment according to the SCG can be destructive!! Make sure you fully understand the guidance in the SCG before proceeding.** To protect against destructive tasks that could impact your nested lab environment, a series of DEFCON levels (see below) have been created. The following scripts assume a default `DEFCON LEVEL 5`. To make more impactful changes you will have to explicitly pass the DEFCON level into the command line.  
+
+Install PowerShell and other prerequsites needed for the audit.
+```
+sudo python3 hesiod-theogony.py -m13 --setup
+``` 
+Runs the audit.
+```
+sudo python3 hesiod-theogony.py -m13
+``` 
+Builds a report against the last audit.
+```
+sudo python3 hesiod-theogony.py -m13 --report
+``` 
+Makes necessary changes to VCF Fleet to remediate audit failures (Default: DEFCON LEVEL 5)
+```
+sudo python3 hesiod-theogony.py -m13 --remediate
+``` 
+
+
+## DEFCON LEVELS
+| DEFCON LEVEL | DEFCON DESCRIPTION                  | RISK             |
+|--------------|-------------------------------------|------------------|
+| DEFCON 5     | Changes settings and policies only. | Safest (default) |
+| DEFCON 4     | Adds service/feature state.         | Low              |
+| DEFCON 3     | Adds VM power cycles and switch security. | Medium     |
+| DEFCON 2     | Adds lock-out risks.                | High             |
+| DEFCON 1     | Adds reboots and TLS cut-over.      | Critical         |
+
+Makes necessary changes to VCF Fleet to remediate audit failures with the specified DEFCON LEVEL.
+```
+sudo python3 hesiod-theogony.py -m13 --defcon N --remediate
+``` 
+
+# Module 14: Deploy a VI Workload Domain
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 4     | DNS Entries need to be completed.            |
+| Module 5     | LLDAP needs to be running and available.     |
+| Module 6     | LDAP Users and Groups need to be completed.  |
+| Module 7 (VI) | Nested ESXi hosts (recommended: 4) are deployed.  |
+| Module 8     | VCF Fleet is deployed.                       |
+| Module 9     | Password Vault is deployed and available.    |
+| Module 10    | Certificate Authority is deployed and available. |
+| Module 11    | SFTP backup server is deployed and available.|
+| Module 12    | KMS Server is deployed and available.        |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and build a VI workload domain. Integrations to all shared services running on HKS from Module 2 (DNS, LDAP, Password Vault, CA, SFTP, etc) are automatically included.
+
+Creates network pool and commissions the VI hosts in SDDC Manager.
+```
+sudo python3 hesiod-theogony.py -m14 --commission
+``` 
+Validates the hosts via SDDC Manager.
+```
+sudo python3 hesiod-theogony.py -m14 --validate
+``` 
+Builds the VI workload domain using the verified hosts.
+```
+sudo python3 hesiod-theogony.py -m14 --deploy
+``` 
+Retry the build of the VI workload domain using the verified hosts after a failure.
+```
+sudo python3 hesiod-theogony.py -m14 --retry
+``` 
+Check the status of the workload domain.
+```
+sudo python3 hesiod-theogony.py -m14 --status
+``` 
+Build a markdown file with a report on the workload domain deployment.
+```
+sudo python3 hesiod-theogony.py -m14 --report
 ``` 

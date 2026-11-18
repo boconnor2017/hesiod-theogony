@@ -148,7 +148,7 @@ def help_menu():
     print("         --remediate          fix failing controls at the DEFCON level in json_lib/scg.json (default 5 = safest),")
     print("                              then audit again. --defcon N overrides the level for one run (1 = everything),")
     print("                              --dry-run only lists the plan, --controls a,b narrows it.")
-    print("    -m14: (Module 14) VI workload domain from lab_spec[\"workload_domains\"]. Default: plan + local preflight.")
+    print("    -m14: (Module 14) Deploy a VI Workload Domain")
     print("         --commission         network pool + commission the VI hosts (from -m7 VI) in SDDC Manager")
     print("         --validate           commission if needed, then SDDC Manager validation of the domain spec")
     print("         --deploy             validate, create the domain, monitor it (2-4h), set the default vSAN policy")
