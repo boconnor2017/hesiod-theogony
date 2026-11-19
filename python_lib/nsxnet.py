@@ -7,7 +7,8 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (edge state read from the realized transport node; the policy path has no usable /state)
+# Version: 1.2 (idempotent reruns: existing objects are updated with PUT + _revision, not PATCHed)
+#         1.1 (edge state read from the realized transport node; the policy path has no usable /state)
 #
 # lab_spec: workload_domains[n]["edge"] and workload_domains[n]["vpc"] (see json_lib/lab_spec.json). The lab router
 # (the design's tor-a/tor-b) is configured by hand: -m15 EDGE --router-config prints what it needs.
@@ -98,6 +99,19 @@ class Nsx:
 
     def post(self, path, body=None):
         return self._call("POST", path, body)
+
+    def put(self, path, body):
+        return self._call("PUT", path, body)
+
+    def ensure(self, path, body):
+        """Create with PATCH; when the object exists, PUT it back only if a field we set differs (some NSX objects,
+        e.g. host switch profiles, refuse a PATCH on an existing path)."""
+        cur = self.get(path, ok404=True)
+        if not cur:
+            return self.patch(path, body)
+        if all(cur.get(k) == v for k, v in body.items()):
+            return cur
+        return self.put(path, {**cur, **body})
 
     def delete(self, path):
         return self._call("DELETE", path, ok404=True)
@@ -502,20 +516,20 @@ def edge_deploy(lab_spec, name=None):
     vc = _vc_objects(edge)
 
     liblog.print_logs("(Edge 1) Uplink profile, edge TEP pool, edge uplink transport zone, trunk and uplink segments.")
-    nsx.patch(f"/infra/host-switch-profiles/{edge['uplink_profile']}", _uplinks_profile(edge))
-    nsx.patch(f"/infra/ip-pools/{edge['tep_pool']}", {"display_name": edge["tep_pool"]})
-    nsx.patch(f"/infra/ip-pools/{edge['tep_pool']}/ip-subnets/s1", {
+    nsx.ensure(f"/infra/host-switch-profiles/{edge['uplink_profile']}", _uplinks_profile(edge))
+    nsx.ensure(f"/infra/ip-pools/{edge['tep_pool']}", {"display_name": edge["tep_pool"]})
+    nsx.ensure(f"/infra/ip-pools/{edge['tep_pool']}/ip-subnets/s1", {
         "resource_type": "IpAddressPoolStaticSubnet", "cidr": edge["tep"]["cidr"], "gateway_ip": edge["tep"]["gateway"],
         "allocation_ranges": [{"start": edge["tep_range"][0], "end": edge["tep_range"][-1]}]})
-    nsx.patch(f"{EP}/transport-zones/{edge['uplink_tz']}", {
+    nsx.ensure(f"{EP}/transport-zones/{edge['uplink_tz']}", {
         "display_name": edge["uplink_tz"], "tz_type": "VLAN_BACKED",
         "uplink_teaming_policy_names": ["uplink-1-only", "uplink-2-only"]})
     # Edge data NICs sit on NSX VLAN trunk segments in the hosts' VLAN zone, so the edge TEP may share the host TEP VLAN
     for t in edge["trunks"]:
-        nsx.patch(f"/infra/segments/{t}", {"display_name": t, "transport_zone_path": host_vlan["path"],
+        nsx.ensure(f"/infra/segments/{t}", {"display_name": t, "transport_zone_path": host_vlan["path"],
                                            "vlan_ids": ["0-4094"]})
     for seg, u, team in zip(edge["uplink_segments"], edge["uplinks"], ("uplink-1-only", "uplink-2-only")):
-        nsx.patch(f"/infra/segments/{seg}", {"display_name": seg, "transport_zone_path": f"{EP}/transport-zones/{edge['uplink_tz']}",
+        nsx.ensure(f"/infra/segments/{seg}", {"display_name": seg, "transport_zone_path": f"{EP}/transport-zones/{edge['uplink_tz']}",
                                              "vlan_ids": [str(u["net"]["vlan"])],
                                              "advanced_config": {"uplink_teaming_policy_name": team}})
     for t in edge["trunks"]:
@@ -808,7 +822,7 @@ def vpc_deploy(lab_spec, name=None):
 
     liblog.print_logs("(VPC 1) IP blocks.")
     ext_path = f"/infra/ip-blocks/{v['ext_block']['id']}"
-    nsx.patch(ext_path, {"display_name": v["ext_block"]["id"], "cidr": v["ext_block"]["cidr"], "visibility": "EXTERNAL"})
+    nsx.ensure(ext_path, {"display_name": v["ext_block"]["id"], "cidr": v["ext_block"]["cidr"], "visibility": "EXTERNAL"})
     prof_path = f"{PROJECT}/vpc-connectivity-profiles/default"
     prof = nsx.get(prof_path) or {}
     ptgw_paths = list(prof.get("private_tgw_ip_blocks") or [])
@@ -817,7 +831,7 @@ def vpc_deploy(lab_spec, name=None):
         mine = next((b for b in existing if b.get("id") == v["ptgw_block"]["id"]), None)
         clash = [b for b in existing if b is not mine and b.get("cidr") and _overlaps(b["cidr"], v["ptgw_block"]["cidr"])]
         if mine or not clash:
-            nsx.patch(f"/infra/ip-blocks/{v['ptgw_block']['id']}", {"display_name": v["ptgw_block"]["id"],
+            nsx.ensure(f"/infra/ip-blocks/{v['ptgw_block']['id']}", {"display_name": v["ptgw_block"]["id"],
                                                                     "cidr": v["ptgw_block"]["cidr"], "visibility": "PRIVATE"})
             ptgw_paths = [f"/infra/ip-blocks/{v['ptgw_block']['id']}"]
         else:
@@ -828,7 +842,7 @@ def vpc_deploy(lab_spec, name=None):
 
     liblog.print_logs(f"(VPC 2) Transit gateway default attached to {v['edge']['t0']}.")
     gc = f"/infra/gateway-connections/{v['gateway_connection']}"
-    nsx.patch(gc, {"display_name": v["gateway_connection"], "tier0_path": t0,
+    nsx.ensure(gc, {"display_name": v["gateway_connection"], "tier0_path": t0,
                    "advertise_outbound_networks": {"allow_external_blocks": [ext_path]}})
     tgw = f"{PROJECT}/transit-gateways/default"
     atts = nsx.results(f"{tgw}/attachments")
