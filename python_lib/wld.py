@@ -5,7 +5,8 @@
 #              Certificates, backups and encryption for the new vCenter/NSX come from Modules 10, 11 and 12.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.3 (own SSO domain per workload domain: VCF 9 has no ELM join; NSX network profile for the uplink profile)
+# Version: 1.4 (TEP pool sized for hosts x uplinks)
+#         1.3 (own SSO domain per workload domain: VCF 9 has no ELM join; NSX network profile for the uplink profile)
 #         1.2 (VI hosts get lab-CA certificates before commissioning, KB 415767)
 #         1.1 (vMotion, vSAN and host TEP ranges on their own lab_spec networks: assign_ip_from_this_network)
 #
@@ -200,6 +201,15 @@ def wld_settings(lab_spec, name=None):
     if nets[0]["subnet"] == nets[1]["subnet"]:
         raise WldError(f"network_pool.vmotion and network_pool.vsan are both on {nets[0]['subnet']}; a network pool "
                        f"needs a separate subnet (VLAN) for each")
+    # NSX gives every host one TEP per active uplink (LOADBALANCE_SRCID teaming), so the TEP pool needs
+    # hosts x uplinks addresses; vMotion and vSAN need one per host. Too small a TEP pool only shows up late, as
+    # "transport node realization failed" in Create NSX Transport Node Collection.
+    vmnics = w.get("vmnics") or vcf.get("cluster", {}).get("vmnics", ["vmnic0", "vmnic1"])
+    need = {"host_tep": len(hosts) * len(vmnics), "network_pool.vmotion": len(hosts), "network_pool.vsan": len(hosts)}
+    for n in nets:
+        if len(n["range"]) < need[n["what"]]:
+            raise WldError(f"workload_domains[].{n['what']} has {len(n['range'])} address(es) but {len(hosts)} hosts need "
+                           f"{need[n['what']]}" + (f" ({len(vmnics)} TEPs per host, one per uplink)" if n["what"] == "host_tep" else ""))
     return {
         "name": w["name"], "entry": w, "recorded": bool(recorded),
         "hosts": hosts, "addresses": addresses, "mgmt": mgmt,
