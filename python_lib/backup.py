@@ -3,7 +3,8 @@
 #              that point the management domain's backups at it.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (NSX manual backup is long-running; NSX folder recognised in the report)
+# Version: 1.3 (workload domains: configure_domain / backup_domain_now for -m14 --backups)
+#         1.2 (NSX manual backup is long-running; NSX folder recognised in the report)
 #
 # Why SFTP: SDDC Manager and NSX Manager back up only to SFTP (VCF 9.1 sets this in SDDC Manager, which is also what
 # VCF Operations > Administration > SDDC Manager > Backup Settings writes to). vCenter's file-based backup also speaks SFTP,
@@ -341,11 +342,11 @@ def _wait_task(sddc, task, what, timeout_s=3600):
 
 class _Vcenter:
     """vCenter Appliance (VAMI) REST API: /api/appliance/recovery/backup/*"""
-    def __init__(self, fqdn, password):
+    def __init__(self, fqdn, password, user="administrator@vsphere.local"):
         self.base = f"https://{fqdn}"
         self.s = requests.Session()
         self.s.trust_env, self.s.verify = False, False
-        r = self.s.post(f"{self.base}/api/session", auth=("administrator@vsphere.local", password), timeout=30)
+        r = self.s.post(f"{self.base}/api/session", auth=(user, password), timeout=30)
         if r.status_code >= 300:
             raise BackupError(f"vCenter {fqdn} login failed: HTTP {r.status_code} {r.text[:200]}")
         self.s.headers["vmware-api-session-id"] = r.json()
@@ -365,10 +366,17 @@ def configure(lab_spec, dry_run=False):
     """SDDC Manager (+NSX) backup configuration and the vCenter file-based backup schedule."""
     cfg = backup_settings(lab_spec)
     names = _plan(lab_spec)
+    _configure_sddc(lab_spec, cfg, dry_run)
+    _configure_vcenter(cfg, names["vcenter"], "administrator@vsphere.local", _vcf_password(lab_spec),
+                       cfg["vcenter_minute"], dry_run)
+    done = "validated (dry run, nothing saved)" if dry_run else "configured"
+    liblog.print_logs(f"Backups {done}: SDDC Manager, NSX (pushed by SDDC Manager), vCenter.")
+
+
+def _configure_sddc(lab_spec, cfg, dry_run=False):
+    """SDDC Manager backup configuration; SDDC Manager pushes the same SFTP settings to every domain's NSX Manager."""
     fp = host_fingerprint()
     sddc = libconjur.sddc_manager_client(lab_spec)
-
-    # 1. SDDC Manager (SDDC Manager pushes the same SFTP settings to NSX Manager)
     location = {"server": _target_host(cfg), "port": 22, "protocol": "SFTP", "username": cfg["username"],
                 "password": cfg["password"], "directoryPath": cfg["directory"], "sshFingerprint": fp}
     spec = {"encryption": {"passphrase": cfg["passphrase"]},
@@ -402,10 +410,12 @@ def configure(lab_spec, dry_run=False):
                               "If VCF Operations shows the same, see Broadcom KB 436354 (stale SDDC Manager locks).")
         liblog.print_logs("    SDDC Manager backup configuration saved and read back.")
 
-    # 2. vCenter file-based backup (VAMI)
-    liblog.print_logs(f"(Configure 2) vCenter {names['vcenter']}: {_vc_location(cfg)}, "
-                      f"daily {cfg['hour']:02d}:{cfg['vcenter_minute']:02d}, keep {cfg['retain']}")
-    vc = _Vcenter(names["vcenter"], _vcf_password(lab_spec))
+
+def _configure_vcenter(cfg, fqdn, user, password, minute, dry_run=False):
+    """vCenter file-based backup (VAMI): validate the SFTP location, then create or update the one schedule."""
+    liblog.print_logs(f"(Configure 2) vCenter {fqdn}: {_vc_location(cfg)}, "
+                      f"daily {cfg['hour']:02d}:{minute:02d}, keep {cfg['retain']}")
+    vc = _Vcenter(fqdn, password, user)
     target = {"location_type": "SFTP", "location": _vc_location(cfg), "location_user": cfg["username"],
               "location_password": cfg["password"], "backup_password": cfg["passphrase"], "parts": []}
     result = vc.call("POST", "/api/appliance/recovery/backup?action=validate", target) or {}
@@ -419,7 +429,7 @@ def configure(lab_spec, dry_run=False):
     if not dry_run:
         schedule = {"location": target["location"], "location_user": cfg["username"],
                     "location_password": cfg["password"], "backup_password": cfg["passphrase"], "enable": True,
-                    "parts": [], "recurrence_info": {"hour": cfg["hour"], "minute": cfg["vcenter_minute"],
+                    "parts": [], "recurrence_info": {"hour": cfg["hour"], "minute": minute,
                                                      "days": [d for d in DAYS]},
                     "retention_info": {"max_count": cfg["retain"]}}
         # vCenter keeps one schedule. Create: POST .../schedules {schedule, spec}. Update: PATCH .../schedules/{id} with the spec.
@@ -431,9 +441,6 @@ def configure(lab_spec, dry_run=False):
         else:
             vc.call("POST", "/api/appliance/recovery/backup/schedules", {"schedule": "default", "spec": schedule})
             liblog.print_logs("    vCenter backup schedule 'default' created.")
-
-    done = "validated (dry run, nothing saved)" if dry_run else "configured"
-    liblog.print_logs(f"Backups {done}: SDDC Manager, NSX (pushed by SDDC Manager), vCenter.")
 
 
 def _wait_validation(sddc, v, timeout_s=900):
@@ -450,16 +457,16 @@ def _wait_validation(sddc, v, timeout_s=900):
     return v
 
 
-def _nsx_session(lab_spec):
-    fqdn = _plan(lab_spec)["nsx"]
+def _nsx_session(lab_spec, fqdn=None):
+    fqdn = fqdn or _plan(lab_spec)["nsx"]
     s = requests.Session()
     s.trust_env, s.verify = False, False
     s.auth = ("admin", _vcf_password(lab_spec))
     return fqdn, s
 
 
-def nsx_backup_state(lab_spec):
-    fqdn, s = _nsx_session(lab_spec)
+def nsx_backup_state(lab_spec, fqdn=None):
+    fqdn, s = _nsx_session(lab_spec, fqdn)
     out = {"fqdn": fqdn}
     r = s.get(f"https://{fqdn}/api/v1/cluster/backups/config", timeout=30)
     if r.status_code == 200:
@@ -489,8 +496,17 @@ def backup_now(lab_spec):
     results["SDDC_MANAGER"] = "SUCCESSFUL"
 
     liblog.print_logs("(Backup 2) NSX Manager.")
-    fqdn, s = _nsx_session(lab_spec)
-    before = max([h["end_ms"] for h in nsx_backup_state(lab_spec).get("history") or []] or [0])
+    results["NSXT_MANAGER"] = _nsx_backup_now(lab_spec)
+    liblog.print_logs("(Backup 3) vCenter.")
+    results["VCENTER"] = _vcenter_backup_now(cfg, names["vcenter"], "administrator@vsphere.local", _vcf_password(lab_spec))
+    liblog.print_logs("Manual backups complete: " + ", ".join(f"{k} {v}" for k, v in results.items()))
+    return results
+
+
+def _nsx_backup_now(lab_spec, fqdn=None):
+    """One NSX backup_to_remote, followed through NSX's backup history."""
+    fqdn, s = _nsx_session(lab_spec, fqdn)
+    before = max([h["end_ms"] for h in nsx_backup_state(lab_spec, fqdn).get("history") or []] or [0])
     # NSX holds this call open while it backs up, so a read timeout only means "still running": keep polling history.
     try:
         r = s.post(f"https://{fqdn}/api/v1/cluster?action=backup_to_remote", json={}, timeout=(15, 120))
@@ -504,7 +520,7 @@ def backup_now(lab_spec):
     while time.time() < deadline:
         time.sleep(20)
         try:
-            newer = [h for h in nsx_backup_state(lab_spec).get("history") or [] if h["end_ms"] > before]
+            newer = [h for h in nsx_backup_state(lab_spec, fqdn).get("history") or [] if h["end_ms"] > before]
         except requests.RequestException:
             continue   # NSX can be slow to answer mid-backup
 
@@ -513,13 +529,13 @@ def backup_now(lab_spec):
             if not last["success"]:
                 raise BackupError(f"NSX backup failed: {last.get('error')}")
             liblog.print_logs(f"    NSX backup: SUCCESSFUL ({last['end']})")
-            results["NSXT_MANAGER"] = "SUCCESSFUL"
-            break
-    else:
-        raise BackupError("NSX backup did not finish within 30 minutes (check NSX > System > Backup & Restore).")
+            return "SUCCESSFUL"
+    raise BackupError("NSX backup did not finish within 30 minutes (check NSX > System > Backup & Restore).")
 
-    liblog.print_logs("(Backup 3) vCenter.")
-    vc = _Vcenter(names["vcenter"], _vcf_password(lab_spec))
+
+def _vcenter_backup_now(cfg, fqdn, user, password):
+    """One vCenter file-based backup job, waited on."""
+    vc = _Vcenter(fqdn, password, user)
     job = vc.call("POST", "/api/appliance/recovery/backup/job",
                   {"location_type": "SFTP", "location": _vc_location(cfg), "location_user": cfg["username"],
                    "location_password": cfg["password"], "backup_password": cfg["passphrase"], "parts": [],
@@ -537,13 +553,43 @@ def backup_now(lab_spec):
             if state != "SUCCEEDED":
                 msgs = [m.get("default_message", "") for m in st.get("messages") or []]
                 raise BackupError(f"vCenter backup {state}: " + " | ".join(msgs)[:500])
-            results["VCENTER"] = "SUCCESSFUL"
-            break
-    else:
-        raise BackupError("vCenter backup did not finish within 60 minutes.")
+            return "SUCCESSFUL"
+    raise BackupError("vCenter backup did not finish within 60 minutes.")
 
-    liblog.print_logs("Manual backups complete: " + ", ".join(f"{k} {v}" for k, v in results.items()))
-    return results
+
+def configure_domain(lab_spec, vcenter_fqdn, vcenter_user, nsx_fqdn, minute, dry_run=False):
+    """A workload domain's backups (-m14 --backups): its NSX Manager gets the SFTP settings from SDDC Manager (they
+    are re-applied when it has none), its vCenter gets its own VAMI schedule into the same vcenter/ folder."""
+    cfg = backup_settings(lab_spec)
+    st = nsx_backup_state(lab_spec, nsx_fqdn)
+    if st.get("enabled") and st.get("server") == _target_host(cfg) and st.get("directory") == cfg["directory"]:
+        liblog.print_logs(f"(Configure 1) NSX {nsx_fqdn}: already backs up to {st['server']}:{st['directory']} (set by SDDC Manager).")
+    else:
+        liblog.print_logs(f"(Configure 1) NSX {nsx_fqdn}: no SFTP backup yet ({st.get('server')}); "
+                          "re-applying SDDC Manager's backup configuration, which it pushes to every NSX Manager.")
+        _configure_sddc(lab_spec, cfg, dry_run)
+        if not dry_run:
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                st = nsx_backup_state(lab_spec, nsx_fqdn)
+                if st.get("enabled") and st.get("server") == _target_host(cfg):
+                    break
+                time.sleep(20)
+            else:
+                raise BackupError(f"NSX {nsx_fqdn} still has no backup location 10 minutes after SDDC Manager saved it "
+                                  "(set it in NSX > System > Backup & Restore, or check SDDC Manager's backup settings).")
+            liblog.print_logs(f"    NSX {nsx_fqdn}: backs up to {st['server']}:{st.get('directory')}.")
+    _configure_vcenter(cfg, vcenter_fqdn, vcenter_user, _vcf_password(lab_spec), minute, dry_run)
+    return {"nsx": nsx_backup_state(lab_spec, nsx_fqdn)}
+
+
+def backup_domain_now(lab_spec, vcenter_fqdn, vcenter_user, nsx_fqdn):
+    cfg = backup_settings(lab_spec)
+    liblog.print_logs(f"(Backup) NSX {nsx_fqdn}.")
+    out = {"NSXT_MANAGER": _nsx_backup_now(lab_spec, nsx_fqdn)}
+    liblog.print_logs(f"(Backup) vCenter {vcenter_fqdn}.")
+    out["VCENTER"] = _vcenter_backup_now(cfg, vcenter_fqdn, vcenter_user, _vcf_password(lab_spec))
+    return out
 
 
 # ---------------------------------------------------------------- evidence report (-m11 --report)

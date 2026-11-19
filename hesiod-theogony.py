@@ -154,7 +154,14 @@ def help_menu():
     print("         --deploy             validate, create the domain, monitor it (2-4h), set the default vSAN policy")
     print("         --status / --retry   attach to / retry the recorded domain creation task")
     print("         --policy             (re)create the vSAN storage policy and make it the datastore default")
-    print("         --report             US-016 evidence report")
+    print("         --certs              lab CA certificates for the domain's vCenter, NSX and hosts (-m10 rotation;")
+    print("                              --dry-run validates only, --force re-issues lab CA certificates too)")
+    print("         --backups            NSX (via SDDC Manager) + vCenter backup schedule to the -m11 SFTP target;")
+    print("                              --backup-now also runs one backup of each, --dry-run validates only")
+    print("         --roles              directory groups -> vCenter permissions + NSX role bindings (Design Table 7,")
+    print("                              or workload_domains[].role_mappings); --dry-run lists the changes")
+    print("         --extend             --certs, --backups and --roles in that order")
+    print("         --report             US-016 evidence report (domain, vSAN, policy, certificates, backups, roles)")
     print("         --domain NAME        pick a workload domain when lab_spec has more than one; --force skips preflight")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
@@ -563,6 +570,14 @@ def m14(args):
             libwld.retry(lab_spec_py, name)
         elif "--policy" in args:
             libwld.storage_policy(lab_spec_py, name)
+        elif any(a in args for a in ("--certs", "--backups", "--roles", "--extend")):
+            dry = "--dry-run" in args
+            if "--certs" in args or "--extend" in args:
+                libwld.extend_certificates(lab_spec_py, name, dry_run=dry, force=("--force" in args))
+            if "--backups" in args or "--extend" in args:
+                libwld.extend_backups(lab_spec_py, name, dry_run=dry, backup_now=("--backup-now" in args))
+            if "--roles" in args or "--extend" in args:
+                libwld.extend_roles(lab_spec_py, name, dry_run=dry)
         elif "--report" in args:
             if libwld.evidence_report(lab_spec_py, name)["result"] != "PASS":
                 std.sys.exit(1)

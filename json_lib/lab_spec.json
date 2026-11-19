@@ -311,6 +311,11 @@
             "raid" : "RAID-5",
             "failures_to_tolerate" : 1
         },
-        "cluster_image" : "<optional: SDDC Manager image name; only needed when there is more than one>"
+        "cluster_image" : "<optional: SDDC Manager image name; only needed when there is more than one>",
+        "role_mappings" : [{
+            "group" : "<optional: directory group, default = Design Table 7 (mpc-platform-admins, -operators, -security-admins, mpc-auditors)>",
+            "vcenter" : "<sample: Admin | ReadOnly | MPC Operator | MPC Security Admin>",
+            "nsx" : "<sample: enterprise_admin | network_op | security_engineer | auditor>"
+        }]
     }]
 }

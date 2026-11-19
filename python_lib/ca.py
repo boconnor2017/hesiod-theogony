@@ -4,7 +4,8 @@
 #              Deployment of step-ca itself lives in python_lib/k8_management.py (deploy_step_ca).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.3 (served-chain check: endpoints that send only their own certificate, e.g. ESXi)
+# Version: 1.4 (domain= on inventory/rotate: workload domains, used by -m14 --certs)
+#         1.3 (served-chain check: endpoints that send only their own certificate, e.g. ESXi)
 #
 # Chain: <name> Root CA (RSA, 10y) -> <name> Intermediate CA (RSA, 5y) -> leaf (RSA 2048 from the VCF CSR, SHA-256)
 # Signing: CSRs are signed inside the step-ca pod with `step ca sign` (JWK provisioner "admin"), via kubectl exec.
@@ -314,8 +315,14 @@ def _put(sddc, path, body):
     return sddc._call("PUT", path, json=body)
 
 
-def _management_domain(sddc):
+def _management_domain(sddc, name=None):
+    """The management domain, or the domain called `name` (a workload domain)."""
     doms = sddc.get("/v1/domains").get("elements", [])
+    if name:
+        d = next((d for d in doms if d.get("name") == name), None)
+        if not d:
+            raise CaError(f"SDDC Manager has no domain named {name} (have: {[x.get('name') for x in doms]})")
+        return d
     mgmt = next((d for d in doms if d.get("type") == "MANAGEMENT"), doms[0] if doms else None)
     if not mgmt:
         raise CaError("SDDC Manager returned no domains.")
@@ -353,16 +360,16 @@ def _fqdn_of(cert):
     return cert.get("resourceName") or cert.get("issuedTo")
 
 
-def get_vcf_certificates(lab_spec, sddc=None):
+def get_vcf_certificates(lab_spec, sddc=None, domain=None):
     sddc = sddc or libconjur.sddc_manager_client(lab_spec)
-    dom = _management_domain(sddc)
+    dom = _management_domain(sddc, domain)
     certs = sddc.get(f"/v1/domains/{dom['id']}/resource-certificates").get("elements", [])
     return sddc, dom, certs
 
 
-def inventory(lab_spec, sddc=None, check_served=True):
-    """Every certificate SDDC Manager manages in the management domain, plus what each endpoint actually serves."""
-    sddc, dom, certs = get_vcf_certificates(lab_spec, sddc)
+def inventory(lab_spec, sddc=None, check_served=True, domain=None):
+    """Every certificate SDDC Manager manages in the management domain (or `domain`), plus what each endpoint serves."""
+    sddc, dom, certs = get_vcf_certificates(lab_spec, sddc, domain)
     root, inter = _ca_chain()
     lab_issuer = inter.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value   # "<name> Intermediate CA"
     rows = []
@@ -454,7 +461,7 @@ def _log_rotation(entry):
         json.dump(log, f, indent=2)
 
 
-def rotate(lab_spec, types=None, force=False, dry_run=False):
+def rotate(lab_spec, types=None, force=False, dry_run=False, domain=None):
     """Generate new keys/CSRs in VCF, sign them with the lab CA, validate, install, verify."""
     cfg = ca_settings(lab_spec)
     wanted = [t.upper() for t in (types or cfg["rotate_types"])]
@@ -465,7 +472,7 @@ def rotate(lab_spec, types=None, force=False, dry_run=False):
 
     liblog.print_logs("(Rotate 1) Current certificates.")
     sddc = libconjur.sddc_manager_client(lab_spec)
-    inv = inventory(lab_spec, sddc, check_served=False)
+    inv = inventory(lab_spec, sddc, check_served=False, domain=domain)
     targets = [r for r in inv["certificates"] if r["type"] in wanted and r["fqdn"]
                and (force or not r["from_lab_ca"] or (r["days_left"] or 0) <= cfg["renew_within_days"])]
     seen, uniq = set(), []
@@ -539,6 +546,7 @@ def rotate(lab_spec, types=None, force=False, dry_run=False):
             sddc = libconjur.sddc_manager_client(lab_spec)   # its API restarted with the new certificate
 
     _log_rotation({"time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "dry_run": dry_run,
+                   "domain": inv.get("domain"),
                    "forced": force, "results": results})
     done = "validated (dry run, nothing installed)" if dry_run else "rotated"
     liblog.print_logs(f"Certificate rotation complete: {len(results)} {done}.")
