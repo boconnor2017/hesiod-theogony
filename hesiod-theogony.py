@@ -176,6 +176,7 @@ def help_menu():
     print("         --hello-world        2 Ubuntu test VMs (private + public subnet) and the tests: Auto-SNAT egress,")
     print("                              public VM reachable from this appliance (jump01), jumbo vmkping between TEPs")
     print("         --report             US-018 evidence;  --cleanup deletes the 2 test VMs")
+    print("         --diagnose           read-only: where the VPC routes stop (VPC, transit gateway, Tier-0, BGP)")
     print("         --domain NAME        workload domain (default: the first in lab_spec)")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
@@ -633,6 +634,8 @@ def m15(args):
                 libnsxnet.hello_world(lab_spec_py, name)
             elif "--cleanup" in args:
                 libnsxnet.hello_world_cleanup(lab_spec_py, name)
+            elif "--diagnose" in args:
+                libnsxnet.vpc_diagnose(lab_spec_py, name)
             elif "--report" in args:
                 if libnsxnet.vpc_report(lab_spec_py, name)["result"] != "PASS":
                     std.sys.exit(1)

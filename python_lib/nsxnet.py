@@ -7,7 +7,9 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (idempotent reruns: existing objects are updated with PUT + _revision, not PATCHed)
+# Version: 1.4 (-m15 VPC --diagnose: where the VPC routes stop between VPC, transit gateway, Tier-0 and BGP)
+#         1.3 (Hello World: diagnostics when egress fails, TEP test details, no crash after the vCenter logout)
+#         1.2 (idempotent reruns: existing objects are updated with PUT + _revision, not PATCHed)
 #         1.1 (edge state read from the realized transport node; the policy path has no usable /state)
 #
 # lab_spec: workload_domains[n]["edge"] and workload_domains[n]["vpc"] (see json_lib/lab_spec.json). The lab router
@@ -1008,13 +1010,25 @@ def hello_world(lab_spec, name=None):
                              f"curl -sS -o /dev/null -w \"%{{http_code}} %{{remote_ip}}\" --max-time 30 {v['test_url']}")
         priv = {"vm": vm_priv.name, "ip": ip_priv, "url": v["test_url"], "exit": rc, "output": out}
         liblog.print_logs(f"    private VM {ip_priv}: curl {v['test_url']} -> exit {rc}, {out[:120]}")
+        if rc != 0:
+            # Which part failed: DNS server reachable? Internet reachable by IP? (separates DNS from routing/NAT)
+            probes = " ; ".join([f"echo DNS {d}: $(ping -c 2 -W 2 {d} >/dev/null 2>&1 && echo reachable || echo unreachable)" for d in dns]
+                                + ["echo GW $(ip -4 route show default | head -1)",
+                                   "echo 1.1.1.1: $(ping -c 2 -W 2 1.1.1.1 >/dev/null 2>&1 && echo reachable || echo unreachable)",
+                                   "echo resolv: $(grep ^nameserver /etc/resolv.conf | tr \"\\n\" \" \")",
+                                   "echo resolved: $(resolvectl dns 2>/dev/null | tr \"\\n\" \" \")"])
+            _, diag = _guest_run(si, vm_priv, v["os_auth"], probes, timeout_s=90)
+            priv["diagnostics"] = diag
+            for line in diag.splitlines():
+                liblog.print_logs(f"        {line}")
+        pub_name = vm_pub.name
     finally:
         Disconnect(si)
     pub_ok = _pings(ip_pub)
     liblog.print_logs(f"    public VM {ip_pub}: ping from {socket.gethostname()} (jump01) -> {'reply' if pub_ok else 'no reply'}")
     teps = tep_jumbo_test(v)
     res = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "private": priv,
-           "public": {"vm": vm_pub.name if vm_pub else None, "ip": ip_pub, "ping_from": socket.gethostname(), "ok": pub_ok},
+           "public": {"vm": pub_name, "ip": ip_pub, "ping_from": socket.gethostname(), "ok": pub_ok},
            "teps": teps}
     os.makedirs(libwld.WLD_DIR, exist_ok=True)
     with open(os.path.join(libwld.WLD_DIR, f"{v['name']}_hello_world.json"), "w") as f:
@@ -1068,6 +1082,12 @@ def tep_jumbo_test(v):
         x["ssh"].close()
     good = sum(r["ok"] for r in results)
     liblog.print_logs(f"    jumbo vmkping (8972 bytes, DF) between TEPs: {good}/{len(results)} passed.")
+    for f, x in hosts.items():
+        liblog.print_logs(f"        {f}: TEPs {', '.join(x['teps']) or 'none found'}{'  (' + x['error'][:120] + ')' if x.get('error') else ''}")
+    for r in [r for r in results if not r["ok"]][:8]:
+        liblog.print_logs(f"        FAIL {r['from']} -> {r['to']} ({r.get('owner')}): {r.get('detail')}")
+    if edge_teps:
+        liblog.print_logs(f"        edge TEPs: {', '.join(edge_teps)}")
     return results
 
 
@@ -1120,6 +1140,79 @@ def vpc_report(lab_spec, name=None):
     rep["result"] = "PASS" if all(c["result"] == "PASS" for c in rep["checks"]) else "FAIL"
     _write_evidence(f"vpc_{v['name']}_evidence", rep["title"], rep)
     return rep
+
+
+def _routes_in(obj, prefix):
+    """Every network string inside an NSX routing/forwarding-table answer that falls inside prefix."""
+    net = ipaddress.ip_network(prefix, strict=False)
+    found = set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, val in o.items():
+                if k in ("network", "prefix", "destination") and isinstance(val, str):
+                    try:
+                        if ipaddress.ip_network(val, strict=False).subnet_of(net):
+                            found.add(val)
+                    except (ValueError, TypeError):
+                        pass
+                walk(val)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+    walk(obj)
+    return sorted(found, key=lambda x: ipaddress.ip_network(x, strict=False))
+
+
+def vpc_diagnose(lab_spec, name=None):
+    """Read-only: follow the VPC external block from the VPC to the transit gateway, the Tier-0 and BGP."""
+    v = vpc_settings(lab_spec, name)
+    e = v["edge"]
+    nsx = _nsx(e)
+    ext = v["ext_block"]["cidr"]
+    t0 = f"/infra/tier-0s/{e['t0']}"
+    ls = f"{t0}/locale-services/default"
+    out = {}
+
+    def step(label, fn):
+        try:
+            r = fn()
+        except NetError as x:
+            r = f"ERROR {str(x)[:300]}"
+        out[label] = r
+        text = r if isinstance(r, str) else json.dumps(r, default=str)
+        liblog.print_logs(f"  {label}: {text[:400]}")
+        return r
+
+    liblog.print_logs(f"(Diagnose) Where do the {ext} routes stop? VPC -> transit gateway -> {e['t0']} -> BGP -> lab router")
+    step("VPC subnets", lambda: {s_.get("id"): {"mode": s_.get("access_mode"), "ips": s_.get("ip_addresses")}
+                                for s_ in nsx.results(f"{PROJECT}/vpcs/{v['vpc']}/subnets")})
+    step("VPC attachment", lambda: {k: (nsx.get(f"{PROJECT}/vpcs/{v['vpc']}/attachments/default") or {}).get(k)
+                                    for k in ("vpc_connectivity_profile",)})
+    step("VPC realized", lambda: [(x.get("entity_type"), x.get("state"), x.get("runtime_status"))
+                                  for x in (nsx.get(f"/infra/realized-state/realized-entities?intent_path={PROJECT}/vpcs/{v['vpc']}") or {}).get("results") or []])
+    step("Gateway connection", lambda: {k: (nsx.get(f"/infra/gateway-connections/{v['gateway_connection']}") or {}).get(k)
+                                        for k in ("tier0_path", "advertise_outbound_networks", "aggregate_routes",
+                                                  "inbound_remote_networks")})
+    step("Gateway connection realized", lambda: [(x.get("entity_type"), x.get("state"), x.get("runtime_status"))
+                                                 for x in (nsx.get(f"/infra/realized-state/realized-entities?intent_path=/infra/gateway-connections/{v['gateway_connection']}") or {}).get("results") or []])
+    step("Transit gateway attachments", lambda: [a.get("connection_path") for a in nsx.results(f"{PROJECT}/transit-gateways/default/attachments")])
+    for label, path in (("Transit gateway routes", f"{PROJECT}/transit-gateways/default/routing-table"),
+                        ("Transit gateway forwarding", f"{PROJECT}/transit-gateways/default/forwarding-table")):
+        step(label + f" in {ext}", lambda path=path: _routes_in(nsx.get(path) or {}, ext))
+    step("Tier-0 redistribution", lambda: (nsx.get(ls) or {}).get("route_redistribution_config"))
+    for label, path in (("Tier-0 routing table", f"{t0}/routing-table"),
+                        ("Tier-0 forwarding table", f"{t0}/forwarding-table")):
+        step(label + f" in {ext}", lambda path=path: _routes_in(nsx.get(path) or {}, ext))
+    for u in e["uplinks"]:
+        step(f"Advertised to {u['peer']}", lambda u=u: _routes_in(
+            nsx.get(f"{ls}/bgp/neighbors/{_nbr_id(u)}/advertised-routes") or {}, "0.0.0.0/0"))
+    os.makedirs(libwld.WLD_DIR, exist_ok=True)
+    path = os.path.join(libwld.WLD_DIR, f"{v['name']}_vpc_diagnose.json")
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2, default=str)
+    liblog.print_logs(f"Saved: {path}")
+    return out
 
 
 # Dry run (settings only, no network calls):  python3 -m python_lib.nsxnet conf/lab_spec.json [domain]
