@@ -7,7 +7,8 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.4 (-m15 VPC --diagnose: where the VPC routes stop between VPC, transit gateway, Tier-0 and BGP)
+# Version: 1.5 (--diagnose shows route types, BGP session state and the raw advertised-routes answer)
+#         1.4 (-m15 VPC --diagnose: where the VPC routes stop between VPC, transit gateway, Tier-0 and BGP)
 #         1.3 (Hello World: diagnostics when egress fails, TEP test details, no crash after the vCenter logout)
 #         1.2 (idempotent reruns: existing objects are updated with PUT + _revision, not PATCHed)
 #         1.1 (edge state read from the realized transport node; the policy path has no usable /state)
@@ -1153,7 +1154,8 @@ def _routes_in(obj, prefix):
                 if k in ("network", "prefix", "destination") and isinstance(val, str):
                     try:
                         if ipaddress.ip_network(val, strict=False).subnet_of(net):
-                            found.add(val)
+                            rt = o.get("route_type") or o.get("type") or o.get("route_source")
+                            found.add(f"{val} ({rt})" if rt else val)
                     except (ValueError, TypeError):
                         pass
                 walk(val)
@@ -1161,7 +1163,7 @@ def _routes_in(obj, prefix):
             for x in o:
                 walk(x)
     walk(obj)
-    return sorted(found, key=lambda x: ipaddress.ip_network(x, strict=False))
+    return sorted(found, key=lambda x: ipaddress.ip_network(x.split()[0], strict=False))
 
 
 def vpc_diagnose(lab_spec, name=None):
@@ -1204,9 +1206,14 @@ def vpc_diagnose(lab_spec, name=None):
     for label, path in (("Tier-0 routing table", f"{t0}/routing-table"),
                         ("Tier-0 forwarding table", f"{t0}/forwarding-table")):
         step(label + f" in {ext}", lambda path=path: _routes_in(nsx.get(path) or {}, ext))
+    step("BGP sessions", lambda: [f"{b['source']}->{b['neighbor']} {b['state']} in={b['received']} out={b['sent']}"
+                                  for b in _bgp_status(nsx, e)])
     for u in e["uplinks"]:
-        step(f"Advertised to {u['peer']}", lambda u=u: _routes_in(
-            nsx.get(f"{ls}/bgp/neighbors/{_nbr_id(u)}/advertised-routes") or {}, "0.0.0.0/0"))
+        def adv(u=u):
+            raw = nsx.get(f"{ls}/bgp/neighbors/{_nbr_id(u)}/advertised-routes") or {}
+            routes = _routes_in(raw, "0.0.0.0/0")
+            return routes or f"none; raw answer: {json.dumps(raw, default=str)[:300]}"
+        step(f"Advertised to {u['peer']}", adv)
     os.makedirs(libwld.WLD_DIR, exist_ok=True)
     path = os.path.join(libwld.WLD_DIR, f"{v['name']}_vpc_diagnose.json")
     with open(path, "w") as f:
