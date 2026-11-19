@@ -25,6 +25,7 @@ from python_lib import backup as libbackup
 from python_lib import kms as libkms
 from python_lib import scg as libscg
 from python_lib import wld as libwld
+from python_lib import nsxnet as libnsxnet
 
 # Local Functions
 def _main_(args):
@@ -89,6 +90,10 @@ def _main_(args):
 
     if '-m13' in args:
         m13(args)
+        std.sys.exit()
+
+    if '-m15' in args:
+        m15(args)
         std.sys.exit()
 
     if '-m14' in args:
@@ -162,6 +167,16 @@ def help_menu():
     print("         --report             US-016 evidence report (domain, vSAN, policy, certificates, backups, and the")
     print("                              role mappings assigned by hand, read-only)")
     print("         --domain NAME        pick a workload domain when lab_spec has more than one; --force skips preflight")
+    print("    -m15 EDGE: (Module 15) Edge cluster, Tier-0, eBGP + BFD to the lab router (US-017). Default: plan + preflight.")
+    print("         --router-config      what the lab router needs (neighbors, AS, BFD, prefixes) + an FRR example")
+    print("         --deploy             uplink profile, edge TEP pool, trunks, 2 edges, edge cluster, Tier-0, BGP, MTU")
+    print("         --report             US-017 evidence (BGP Established, BFD, only 0.0.0.0/0 in, MTU, edge CLI output)")
+    print("    -m15 VPC: (Module 15) Transit gateway, IP blocks, VPC profile, Hello World VPC (US-018). Default: plan.")
+    print("         --deploy             IP blocks, transit gateway -> Tier-0, connectivity profile, VPC + 2 subnets")
+    print("         --hello-world        2 Ubuntu test VMs (private + public subnet) and the tests: Auto-SNAT egress,")
+    print("                              public VM reachable from this appliance (jump01), jumbo vmkping between TEPs")
+    print("         --report             US-018 evidence;  --cleanup deletes the 2 test VMs")
+    print("         --domain NAME        workload domain (default: the first in lab_spec)")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -587,6 +602,48 @@ def m14(args):
     finally:
         print("=========================================================")
         print("Module 14 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m15(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 15")
+    print("=========================================================")
+    part = next((a.upper() for a in args if a.upper() in ("EDGE", "VPC")), None)
+    if not part:
+        liblog.print_logs("Usage: -m15 EDGE|VPC [--deploy|--report|...] (see --help)")
+        std.sys.exit(1)
+    lab_spec_py = import_lab_configuration_parameters()
+    name = args[args.index("--domain") + 1] if "--domain" in args and args.index("--domain") + 1 < len(args) else None
+    try:
+        if part == "EDGE":
+            if "--router-config" in args:
+                libnsxnet.router_config(lab_spec_py, name)
+            elif "--deploy" in args:
+                libnsxnet.edge_deploy(lab_spec_py, name)
+            elif "--report" in args:
+                if libnsxnet.edge_report(lab_spec_py, name)["result"] != "PASS":
+                    std.sys.exit(1)
+            elif libnsxnet.edge_plan(lab_spec_py, name):
+                std.sys.exit(1)
+        else:
+            if "--deploy" in args:
+                libnsxnet.vpc_deploy(lab_spec_py, name)
+            elif "--hello-world" in args:
+                libnsxnet.hello_world(lab_spec_py, name)
+            elif "--cleanup" in args:
+                libnsxnet.hello_world_cleanup(lab_spec_py, name)
+            elif "--report" in args:
+                if libnsxnet.vpc_report(lab_spec_py, name)["result"] != "PASS":
+                    std.sys.exit(1)
+            elif libnsxnet.vpc_plan(lab_spec_py, name):
+                std.sys.exit(1)
+    except (libnsxnet.NetError, libwld.WldError, libvcf.VcfError, libesxi.EsxiBuildError) as e:
+        liblog.print_logs("Module 15 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 15 runtime is completed.")
         print("=========================================================")
         print("")
 

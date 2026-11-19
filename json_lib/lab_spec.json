@@ -311,6 +311,35 @@
             "raid" : "RAID-5",
             "failures_to_tolerate" : 1
         },
-        "cluster_image" : "<optional: SDDC Manager image name; only needed when there is more than one>"
+        "cluster_image" : "<optional: SDDC Manager image name; only needed when there is more than one>",
+        "edge" : {
+            "edge_cluster_name" : "<sample: ec-w01>",
+            "count" : 2,
+            "form_factor" : "MEDIUM",
+            "tep" : {"assign_ip_from_this_network" : "<sample: 6 (edge TEP VLAN; may be the host TEP network)>", "range_start" : "<sample: 60>", "range_end" : "<sample: 69>"},
+            "uplinks" : [
+                {"assign_ip_from_this_network" : "<sample: 7 (uplink VLAN A, the design's 1625)>", "edge_ips" : ["2", "3"], "peer_ip" : "1"},
+                {"assign_ip_from_this_network" : "<sample: 8 (uplink VLAN B, the design's 1626)>", "edge_ips" : ["2", "3"], "peer_ip" : "1"}
+            ],
+            "tier0" : {"name" : "<sample: t0-w01>", "asn" : "65100", "ha_mode" : "ACTIVE_STANDBY"},
+            "bgp" : {"remote_asn" : "65001", "keepalive" : 60, "hold" : 180, "bfd" : true},
+            "mtu" : {"interface" : 9000, "global_gateway" : 8800},
+            "inbound_prefix_list" : "pl-default-only"
+        },
+        "vpc" : {
+            "external_block" : {"name" : "<sample: ext-10-80-0-0-22>", "cidr" : "<sample: 10.80.0.0/22>"},
+            "private_tgw_block" : {"name" : "<sample: ptgw-172-20-0-0-16>", "cidr" : "<sample: 172.20.0.0/16>"},
+            "profile_name" : "mpc-vpc-profile",
+            "hello_world" : {
+                "vpc" : "hello-world-vpc",
+                "private_cidr" : "<sample: 172.24.0.0/16>",
+                "subnets" : {"private" : {"name" : "sn-private", "size" : 16}, "public" : {"name" : "sn-public", "size" : 16}},
+                "vm_prefix" : "hw",
+                "vm_cpu" : 1,
+                "vm_memory_gb" : 2,
+                "test_url" : "https://dl.broadcom.com",
+                "OVA_path" : "<optional: defaults to the first ubuntu_servers[].OVA_path>"
+            }
+        }
     }]
 }
