@@ -7,7 +7,7 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (edge state read from the realized transport node; the policy path has no usable /state)
 #
 # lab_spec: workload_domains[n]["edge"] and workload_domains[n]["vpc"] (see json_lib/lab_spec.json). The lab router
 # (the design's tor-a/tor-b) is configured by hand: -m15 EDGE --router-config prints what it needs.
@@ -405,13 +405,42 @@ def _uplinks_profile(edge):
                                {"name": "uplink-2-only", "policy": "FAILOVER_ORDER", "active_list": [up[1]]}]}
 
 
+_MP_IDS = {}
+
+
+def _edge_state(nsx, eid):
+    """Deployment state of an edge: the policy /state when it answers with one, else the management-plane transport
+    node state (/api/v1/transport-nodes/<uuid>/state), the uuid found by the edge's display name."""
+    try:
+        st = nsx.get(f"{EP}/edge-transport-nodes/{eid}/state", ok404=True) or {}
+    except NetError:
+        st = {}
+    if st.get("state"):
+        return st
+    if eid not in _MP_IDS:
+        try:
+            for tn in (nsx.get("/api/v1/transport-nodes?node_types=EdgeNode") or {}).get("results") or []:
+                if tn.get("display_name") == eid or (tn.get("node_deployment_info") or {}).get("display_name") == eid:
+                    _MP_IDS[eid] = tn.get("node_id") or tn.get("id")
+        except NetError:
+            pass
+        if eid not in _MP_IDS:
+            if st:
+                liblog.print_logs(f"    edge {eid}: unrecognised state answer {sorted(st)[:12]}")
+            return {}
+    try:
+        return nsx.get(f"/api/v1/transport-nodes/{_MP_IDS[eid]}/state", ok404=True) or {}
+    except NetError:
+        return {}
+
+
 def _wait_edges(nsx, ids):
     deadline = time.time() + EDGE_TIMEOUT
     last = {}
     while True:
         done = 0
         for i in ids:
-            st = nsx.get(f"{EP}/edge-transport-nodes/{i}/state", ok404=True) or {}
+            st = _edge_state(nsx, i)
             dep = (st.get("node_deployment_state") or {}).get("state", "")
             s = f"{st.get('state', '?')}/{dep or '?'}"
             if last.get(i) != s:
@@ -694,7 +723,7 @@ def edge_report(lab_spec, name=None):
         {"vlan": u["net"]["vlan"], "edge_ips": u["edge_ips"], "peer": u["peer"]} for u in edge["uplinks"]]}
     ids = [a["short"] for a in edge["addresses"].values()]
     for eid in ids:
-        st = nsx.get(f"{EP}/edge-transport-nodes/{eid}/state", ok404=True) or {}
+        st = _edge_state(nsx, eid)
         add(f"Edge {eid} deployed and ready", st.get("state") == "success",
             f"{st.get('state')}/{(st.get('node_deployment_state') or {}).get('state')}")
     bgp = _bgp_status(nsx, edge)
@@ -987,7 +1016,7 @@ def tep_jumbo_test(v):
     nsx = _nsx(v["edge"])
     edge_teps = []
     for a in v["edge"]["addresses"].values():
-        st = nsx.get(f"{EP}/edge-transport-nodes/{a['short']}/state", ok404=True) or {}
+        st = _edge_state(nsx, a["short"])
         for hs in st.get("host_switch_states") or []:
             edge_teps += [e.get("ip") for e in hs.get("endpoints") or [] if e.get("ip")]
     hosts = {}

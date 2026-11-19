@@ -140,6 +140,8 @@ sudo python3 hesiod-theogony.py -m7 VI --replace
 ```  
 
 ## Module 8: Deploy VCF Fleet Management Domain
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 3     | Technitium needs to be running and availble. |
@@ -171,6 +173,8 @@ sudo python3 hesiod-theogony.py -m8 --status
 ``` 
 
 ## Module 9: Deploy a CyberArk Conjur OSS Server on HKS
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -188,6 +192,8 @@ sudo python3 hesiod-theogony.py -m9 --report
 ``` 
 
 ## Module 10: Deploy a Certificate Authority and Rotate Certs
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -212,6 +218,8 @@ sudo python3 hesiod-theogony.py -m10 --report
 ``` 
 
 ## Module 11: Deploy an SFTP Server and Configure Backups
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -240,6 +248,8 @@ sudo python3 hesiod-theogony.py -m11 --report
 ``` 
 
 ## Module 12: Deploy a KMS Server and Encrypt vSAN
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -273,6 +283,8 @@ sudo python3 hesiod-theogony.py -m12 --report
 ``` 
 
 ## Module 13: Audit the Management Domain against the VCF 9.1 Security Compliance Guide
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -312,6 +324,8 @@ sudo python3 hesiod-theogony.py -m13 --defcon N --remediate
 ``` 
 
 ## Module 14: Deploy a VI Workload Domain
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 3     | Technitium needs to be running and availble. |
@@ -364,4 +378,62 @@ sudo python3 hesiod-theogony.py -m14 --certs
 Extends backups to the new workload domain
 ```
 sudo python3 hesiod-theogony.py -m14 --backups --backup-now
+``` 
+
+## Module 15: Deploy an Edge and a VPC with BGP
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Getting Started | Router BGP settings need to be verified.  |
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 7 (VI) | Nested ESXi hosts (recommended: 4) are deployed.  |
+| Module 8     | VCF Fleet is deployed.                       |
+| Module 14    | VCF VI workload domain is deployed.          |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and build a VPC on the VI workload domain deployed in Module 14. Use parameters `EDGE` to deploy the necessary VCF Networking Edge infrastructure, and `VPC` to deploy the VPC itself. Each option has additional parameters as specified below. **IMPORTANT: Run each script below in the following order and ensure results are successful before proceeding to the next.**
+
+Shows the deployment plan and checks the prerequisites.
+```
+sudo python3 hesiod-theogony.py -m15 EDGE
+``` 
+
+Prints what your lab router needs: per uplink VLAN, its IP, the two edge neighbors, remote AS, 60/180 timers and BFD. It also prints an FRR example. Your router should send only a default route and accept the VPC external block.
+```
+sudo python3 hesiod-theogony.py -m15 EDGE --router-config
+``` 
+
+Deploys the necessary VCF Networking Edge infrastructure for the VPC.
+```
+sudo python3 hesiod-theogony.py -m15 EDGE --deploy
+``` 
+
+Validates the edges.
+```
+sudo python3 hesiod-theogony.py -m15 EDGE --report
+``` 
+
+Shows the plan and checks the Tier-0, transit gateway and default VPC connectivity profile exist, BGP is up, and the Ubuntu OVA is there.
+```
+sudo python3 hesiod-theogony.py -m15 VPC
+``` 
+
+Deploys the VPC.
+```
+sudo python3 hesiod-theogony.py -m15 VPC --deploy
+``` 
+
+Builds two Ubuntu VMs from the same cloud-image OVA as your other Ubuntu servers, one per subnet. It runs curl https://dl.broadcom.com inside the private VM through VMware Tools, since that VM has no inbound route. It pings the public VM from hesthe001, which plays jump01. It runs vmkping ++netstack=vxlan -d -s 8972 from every host TEP to every other host and edge TEP.
+```
+sudo python3 hesiod-theogony.py -m15 VPC --hello-world
+``` 
+
+Validates the VPC.
+```
+sudo python3 hesiod-theogony.py -m15 EDGE --report
+``` 
+
+(Optional) Deletes the two Hello World vms. 
+```
+sudo python3 hesiod-theogony.py -m15 EDGE --cleanup
 ``` 
