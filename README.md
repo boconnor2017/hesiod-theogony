@@ -272,7 +272,7 @@ Generate a markdown file showing readiness of vSAN Encryption.
 sudo python3 hesiod-theogony.py -m12 --report
 ``` 
 
-# Module 13: Audit the Management Domain against the VCF 9.1 Security Compliance Guide
+## Module 13: Audit the Management Domain against the VCF 9.1 Security Compliance Guide
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 8     | VCF Fleet is deployed.                       |
@@ -311,7 +311,7 @@ Makes necessary changes to VCF Fleet to remediate audit failures with the specif
 sudo python3 hesiod-theogony.py -m13 --defcon N --remediate
 ``` 
 
-# Module 14: Deploy a VI Workload Domain
+## Module 14: Deploy a VI Workload Domain
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 3     | Technitium needs to be running and availble. |
@@ -350,4 +350,18 @@ sudo python3 hesiod-theogony.py -m14 --status
 Build a markdown file with a report on the workload domain deployment.
 ```
 sudo python3 hesiod-theogony.py -m14 --report
+``` 
+
+### Extend Certificates and Backups to the New Workload Domain
+Extends certificates to the new workload domain (Dry run is a validation, non impactful)
+```
+sudo python3 hesiod-theogony.py -m14 --certs --dry-run
+``` 
+Extends certificates to the new workload domain, rotates accordingly
+```
+sudo python3 hesiod-theogony.py -m14 --certs
+``` 
+Extends backups to the new workload domain
+```
+sudo python3 hesiod-theogony.py -m14 --backups --backup-now
 ``` 

@@ -5,7 +5,8 @@
 #              Certificates, backups and encryption for the new vCenter/NSX come from Modules 10, 11 and 12.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.5 (day-1 extensions for US-016: --certs, --backups, --roles; evidence checks for all three)
+# Version: 1.6 (role mappings stay manual, as for the management domain; --report lists them read-only)
+#         1.5 (day-1 extensions for US-016: --certs, --backups; evidence checks)
 #         1.4 (TEP pool sized for hosts x uplinks)
 #         1.3 (own SSO domain per workload domain: VCF 9 has no ELM join; NSX network profile for the uplink profile)
 #         1.2 (VI hosts get lab-CA certificates before commissioning, KB 415767)
@@ -27,7 +28,7 @@
 #   storage_policy(lab_spec, name=None)   -m14 --policy: create the vSAN policy and make it the datastore default.
 #   extend_certificates(lab_spec, ...)    -m14 --certs: lab CA certificates for the domain's vCenter, NSX, hosts (Module 10 code).
 #   extend_backups(lab_spec, ...)         -m14 --backups: NSX (via SDDC Manager) + vCenter schedule to the SFTP target (Module 11 code).
-#   extend_roles(lab_spec, ...)           -m14 --roles: directory groups -> vCenter permissions and NSX role bindings.
+#   role_assignments(lab_spec, name=None) read-only: directory groups holding roles on the domain's vCenter and NSX.
 #   evidence_report(lab_spec, name=None)  -m14 --report: US-016 evidence (conf/evidence/wld_<name>_evidence_*.md/json).
 #
 # Every failure raises WldError.
@@ -827,25 +828,11 @@ def storage_policy(lab_spec, name=None):
 
 # ---------------------------------------------------------------- day-1 extensions (US-016)
 # Certificates, backups and role mappings "extended to vc-w01 and nsx-w01". Certificates and backups reuse the
-# Module 10 and Module 11 code with the workload domain as the target; role mappings follow Design Table 7.
+# Module 10 and Module 11 code with the workload domain as the target. Role mappings are done the same way as for the
+# management domain (VCF SSO in VCF Operations, then role assignment in vCenter and NSX); Theogony only reads them back.
 
 CERT_TYPES = ["VCENTER", "NSXT_MANAGER", "ESXI"]   # SDDC Manager's own certificate lives in the management domain
 
-# Design Table 7 (AD group -> role). Override per domain with workload_domains[].role_mappings.
-DEFAULT_ROLE_MAPPINGS = [
-    {"group": "mpc-platform-admins", "vcenter": "Admin", "nsx": "enterprise_admin"},
-    {"group": "mpc-platform-operators", "vcenter": "MPC Operator", "nsx": "network_op"},
-    {"group": "mpc-security-admins", "vcenter": "MPC Security Admin", "nsx": "security_engineer"},
-    {"group": "mpc-auditors", "vcenter": "ReadOnly", "nsx": "auditor"},
-]
-CUSTOM_VC_ROLES = {   # Design Table 7 custom vCenter roles (System.Anonymous/View/Read are always included)
-    "MPC Operator": ["System.Anonymous", "System.View", "System.Read",
-                     "VirtualMachine.Interact.PowerOn", "VirtualMachine.Interact.PowerOff",
-                     "VirtualMachine.Interact.Reset", "VirtualMachine.Interact.Suspend",
-                     "VirtualMachine.Interact.ConsoleInteract", "VirtualMachine.State.CreateSnapshot",
-                     "VirtualMachine.State.RemoveSnapshot", "VirtualMachine.State.RevertToSnapshot"],
-    "MPC Security Admin": ["System.Anonymous", "System.View", "System.Read", "Cryptographer.*"],
-}
 
 
 def _domain_endpoints(cfg):
@@ -879,48 +866,6 @@ def extend_backups(lab_spec, name=None, dry_run=False, backup_now=False):
     liblog.print_logs(f"Backups {'validated (dry run)' if dry_run else 'configured'} for {cfg['name']}.")
 
 
-def _role_mappings(cfg):
-    m = cfg["entry"].get("role_mappings")
-    if not m or (isinstance(m, list) and m and str(m[0].get("group", "")).startswith("<")):
-        return DEFAULT_ROLE_MAPPINGS
-    return m
-
-
-def _vc_find_group(si, group, local_domain):
-    ud = si.content.userDirectory
-    hits = []
-    for exact in (True, False):
-        try:
-            hits = [r for r in ud.RetrieveUserGroups(domain=None, searchStr=group, belongsToGroup=None,
-                                                     belongsToUser=None, exactMatch=exact, findUsers=False,
-                                                     findGroups=True) or []
-                    if r.group and r.principal.split("\\")[-1].split("@")[0].lower() == group.lower()]
-        except Exception:
-            hits = []
-        if hits:
-            break
-    outside = [h for h in hits if not h.principal.lower().startswith(local_domain.split(".")[0].lower() + "\\")]
-    return (outside or hits or [None])[0]
-
-
-def _vc_role(am, name, dry_run):
-    builtin = {"admin": -1, "administrator": -1, "readonly": -2, "read-only": -2, "noaccess": -5}
-    if name.lower().replace(" ", "") in builtin:
-        return builtin[name.lower().replace(" ", "")], "built-in"
-    r = next((r for r in am.roleList if r.name == name), None)
-    if r:
-        return r.roleId, "exists"
-    want = CUSTOM_VC_ROLES.get(name)
-    if not want:
-        raise WldError(f"vCenter role {name!r} does not exist and is not one Theogony knows how to create")
-    all_ids = [p.privId for p in am.privilegeList]
-    privs = sorted({p for w in want for p in ([x for x in all_ids if x.startswith(w[:-1])] if w.endswith("*") else [w])
-                    if p in all_ids})
-    if dry_run:
-        return None, f"would create ({len(privs)} privileges)"
-    return am.AddAuthorizationRole(name=name, privIds=privs), f"created ({len(privs)} privileges)"
-
-
 def _nsx_session(cfg, fqdn):
     s = requests.Session()
     s.trust_env, s.verify = False, False
@@ -929,118 +874,31 @@ def _nsx_session(cfg, fqdn):
     return s
 
 
-def _nsx_identity_source(lab_spec, cfg, s):
-    """How the new NSX can see directory groups: copy what the management NSX's remote-group bindings use, else
-    the VCF SSO (Identity Broker) source NSX exposes as VIDM."""
-    try:
-        mgmt_nsx = libbackup._plan(lab_spec)["nsx"]
-        m = _nsx_session(cfg, mgmt_nsx)
-        r = m.get(f"{m.base}/policy/api/v1/aaa/role-bindings", params={"type": "remote_group"}, timeout=30)
-        for b in (r.json().get("results") or []) if r.status_code == 200 else []:
-            if b.get("identity_source_type"):
-                return {"identity_source_type": b["identity_source_type"],
-                        **({"identity_source_id": b["identity_source_id"]} if b.get("identity_source_id") else {})}
-    except Exception:
-        pass
-    return {"identity_source_type": "VIDM"}
-
-
-def _nsx_find_group(s, group, source):
-    if source["identity_source_type"] == "VIDM":
-        r = s.get(f"{s.base}/policy/api/v1/aaa/vidm/search", params={"search_string": group}, timeout=30)
-        if r.status_code == 200:
-            for g in r.json().get("results") or []:
-                n = g.get("name") or ""
-                if g.get("type", "remote_group") == "remote_group" and n.split("@")[0].lower() == group.lower():
-                    return n
-        return None
-    path = f"{s.base}/policy/api/v1/aaa/ldap-identity-sources/{source.get('identity_source_id')}/search"
-    r = s.get(path, params={"filter_value": group}, timeout=30)
-    if r.status_code == 200:
-        for g in r.json().get("results") or []:
-            if g.get("kind", "group").lower() == "group" and (g.get("name") or "").split("@")[0].lower() == group.lower():
-                return g.get("name")
-    return None
-
-
-def extend_roles(lab_spec, name=None, dry_run=False):
-    """Directory groups (through VCF SSO / the Identity Broker) -> vCenter permissions on the root folder (propagating)
-    and NSX role bindings. Groups the domain cannot see yet are reported, not created: the domain's vCenter and NSX
-    must first be connected to VCF SSO in VCF Operations (the manual step, as for the management domain)."""
+def role_assignments(lab_spec, name=None):
+    """Read-only: directory (non-local) groups with a role on the domain's vCenter (root folder) and NSX."""
     from pyVim.connect import Disconnect
-    from pyVmomi import vim
     cfg = wld_settings(lab_spec, name)
     vc, nsx = _domain_endpoints(cfg)
-    mappings = _role_mappings(cfg)
-    result = {"vcenter": [], "nsx": [], "missing": [], "pending": []}
-    liblog.print_logs(f"(Roles) Domain {cfg['name']}: {len(mappings)} group mapping(s) on {vc} and {nsx}"
-                      f"{' (dry run)' if dry_run else ''}.")
+    local = cfg["sso_domain"].split(".")[0].lower()
+    out = {"vcenter": [], "nsx": []}
     si = _vc_connect(cfg)
     try:
-        am, root = si.content.authorizationManager, si.content.rootFolder
-        current = {(p.principal.lower(), p.roleId) for p in am.RetrieveEntityPermissions(entity=root, inherited=False)}
-        for m in mappings:
-            if not m.get("vcenter"):
-                continue
-            hit = _vc_find_group(si, m["group"], cfg["sso_domain"])
-            if not hit:
-                result["missing"].append(f"vCenter: {m['group']}")
-                liblog.print_logs(f"    vCenter: group {m['group']} not visible in {vc} (connect it to VCF SSO first).")
-                continue
-            role_id, how = _vc_role(am, m["vcenter"], dry_run)
-            if role_id is not None and (hit.principal.lower(), role_id) in current:
-                liblog.print_logs(f"    vCenter: {hit.principal} already {m['vcenter']} on the root folder.")
-            elif dry_run:
-                liblog.print_logs(f"    vCenter: would grant {hit.principal} {m['vcenter']} (role {how}) on the root folder.")
-                result["pending"].append(f"vCenter: {m['group']} -> {m['vcenter']}")
-            else:
-                am.SetEntityPermissions(entity=root, permission=[vim.AuthorizationManager.Permission(
-                    principal=hit.principal, group=True, roleId=role_id, propagate=True)])
-                liblog.print_logs(f"    vCenter: granted {hit.principal} {m['vcenter']} (role {how}) on the root folder.")
-            result["vcenter"].append({"group": hit.principal, "role": m["vcenter"]})
+        am = si.content.authorizationManager
+        names = {r.roleId: r.name for r in am.roleList}
+        for p in am.RetrieveEntityPermissions(entity=si.content.rootFolder, inherited=False):
+            dom = p.principal.split("\\")[0].lower() if "\\" in p.principal else p.principal.split("@")[-1].lower()
+            if p.group and not dom.startswith(local) and dom not in ("vsphere.local", "vsphere"):
+                out["vcenter"].append(f"{p.principal} = {names.get(p.roleId, p.roleId)}")
     finally:
         Disconnect(si)
-
     s = _nsx_session(cfg, nsx)
-    source = _nsx_identity_source(lab_spec, cfg, s)
     r = s.get(f"{s.base}/policy/api/v1/aaa/role-bindings", params={"type": "remote_group"}, timeout=30)
     if r.status_code >= 300:
         raise WldError(f"NSX {nsx}: role bindings: HTTP {r.status_code} {r.text[:200]}")
-    existing = {b.get("name", "").lower(): b for b in r.json().get("results") or []}
-    for m in mappings:
-        if not m.get("nsx"):
-            continue
-        gname = _nsx_find_group(s, m["group"], source)
-        if not gname:
-            result["missing"].append(f"NSX: {m['group']}")
-            liblog.print_logs(f"    NSX: group {m['group']} not visible in {nsx} via {source['identity_source_type']} "
-                              f"(connect it to VCF SSO first).")
-            continue
-        b = existing.get(gname.lower())
-        roles = {x.get("role") for p in (b or {}).get("roles_for_paths") or [] for x in p.get("roles") or []}
-        if m["nsx"] in roles:
-            liblog.print_logs(f"    NSX: {gname} already {m['nsx']}.")
-        elif dry_run:
-            liblog.print_logs(f"    NSX: would bind {gname} to {m['nsx']}.")
-            result["pending"].append(f"NSX: {m['group']} -> {m['nsx']}")
-        else:
-            body = {"name": gname, "type": "remote_group", **source,
-                    "roles_for_paths": [{"path": "/", "roles": [{"role": x} for x in sorted(roles | {m["nsx"]})]}]}
-            if b:
-                body["_revision"] = b.get("_revision")
-                w = s.put(f"{s.base}/policy/api/v1/aaa/role-bindings/{b['id']}", json={**b, **body}, timeout=30)
-            else:
-                w = s.post(f"{s.base}/policy/api/v1/aaa/role-bindings", json=body, timeout=30)
-            if w.status_code >= 300:
-                raise WldError(f"NSX {nsx}: binding {gname} to {m['nsx']}: HTTP {w.status_code} {w.text[:300]}")
-            liblog.print_logs(f"    NSX: bound {gname} to {m['nsx']}.")
-        result["nsx"].append({"group": gname, "role": m["nsx"]})
-    if result["missing"]:
-        liblog.print_logs(f"Roles: {len(result['missing'])} mapping(s) waiting on groups the domain cannot see yet. "
-                          f"In VCF Operations, connect {vc} and {nsx} to VCF SSO, then rerun -m14 --roles.")
-    else:
-        liblog.print_logs(f"Roles: all {len(mappings)} mapping(s) in place.")
-    return result
+    for b in r.json().get("results") or []:
+        roles = sorted({x.get("role") for p in b.get("roles_for_paths") or [] for x in p.get("roles") or []})
+        out["nsx"].append(f"{b.get('name')} = {', '.join(roles)}")
+    return out
 
 
 def _extension_checks(lab_spec, cfg, add):
@@ -1069,11 +927,13 @@ def _extension_checks(lab_spec, cfg, add):
         add(f"vCenter {vc} has an enabled SFTP backup schedule", ok, ", ".join(sched) or "none")
     except Exception as e:
         add("Backups configured", False, e)
-    # role mappings
+    # role mappings (assigned by hand, as for the management domain)
     try:
-        r = extend_roles(lab_spec, cfg["name"], dry_run=True)
-        gaps = r["missing"] + [f"not applied: {x}" for x in r["pending"]]
-        add("Role mappings (vCenter + NSX) in place", not gaps, ", ".join(gaps))
+        r = role_assignments(lab_spec, cfg["name"])
+        add(f"Directory groups hold roles on vCenter {vc}", bool(r["vcenter"]),
+            "; ".join(r["vcenter"]) or "none: connect it to VCF SSO in VCF Operations, then assign roles (Design Table 7)")
+        add(f"Directory groups hold roles on NSX {nsx}", bool(r["nsx"]),
+            "; ".join(r["nsx"]) or "none: connect it to VCF SSO in VCF Operations, then assign roles (Design Table 7)")
     except Exception as e:
         add("Role mappings", False, e)
 
