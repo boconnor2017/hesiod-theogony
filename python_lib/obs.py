@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.6 (--upload reads depot_store itself: no inbox; multi-GB files hard-linked, not copied;
+# Version: 1.7 (VCF Download Tool gets absolute paths: it runs from its own bin/ folder)
+#         1.6 (--upload reads depot_store itself: no inbox; multi-GB files hard-linked, not copied;
 #              a download that is already a depot file (PROD/...) is uploaded as is)
 #         1.5 (--upload: side-load portal downloads into the Fleet depot with the VCF Download Tool, no token)
 #         1.4 (hint when the component binary is missing from the fleet depot)
@@ -571,7 +572,7 @@ def _place(src, dest_dir):
 def upload(lab_spec, part):
     s = settings(lab_spec, part)
     d = _depot_settings(lab_spec, s)
-    store = d["store"]
+    store = os.path.abspath(d["store"])
     if not os.path.isdir(store):
         raise ObsError(f"observability.depot.depot_store {store} does not exist")
     if not os.access(d["exe"], os.X_OK):
@@ -650,7 +651,7 @@ def upload(lab_spec, part):
 
     # (4) upload with the VCF Download Tool (answers its certificate prompt in this terminal on the first run)
     os.makedirs(OBS_DIR, exist_ok=True)
-    pwf = os.path.join(OBS_DIR, ".ops_password")
+    pwf = os.path.abspath(os.path.join(OBS_DIR, ".ops_password"))   # the tool runs from its own bin/ folder
     fd = os.open(pwf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(d["ops_password"])
@@ -668,7 +669,8 @@ def upload(lab_spec, part):
             rc = subprocess.run([d["exe"], "depot", "binaries", "upload", *common, "--sku", "VCF", "--type", "INSTALL",
                                  "--depot-store", store, "--component", c], cwd=os.path.dirname(d["exe"])).returncode
             if rc:
-                raise ObsError(f"vcf-download-tool upload of {c} exited {rc} (its log: {os.path.dirname(os.path.dirname(d['exe']))}/log)")
+                raise ObsError(f"vcf-download-tool upload of {c} exited {rc} (see its output above; 'Unknown options:"
+                               " --ops-fqdn' means a VCF Download Tool older than 9.1.1)")
         liblog.print_logs("(Upload 5) What the Fleet depot now has:")
         subprocess.run([d["exe"], "depot", "binaries", "list", *common], cwd=os.path.dirname(d["exe"]))
     finally:
