@@ -341,5 +341,11 @@
                 "OVA_path" : "<optional: defaults to the first ubuntu_servers[].OVA_path>"
             }
         }
-    }]
+    }],
+    "observability" : {
+        "fleet_lcm_fqdn" : "<optional: defaults to the vcf plan's fleet_lcm FQDN (VCF Operations > Build > Lifecycle > VCF Management > Components)>",
+        "fleet_lcm_user" : "admin@local",
+        "log_management" : { "fqdn" : "auto", "size" : "small", "nodes" : 1, "version" : "auto" },
+        "real_time_metrics" : { "version" : "auto" }
+    }
 }

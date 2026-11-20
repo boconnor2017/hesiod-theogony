@@ -26,6 +26,7 @@ from python_lib import kms as libkms
 from python_lib import scg as libscg
 from python_lib import wld as libwld
 from python_lib import nsxnet as libnsxnet
+from python_lib import obs as libobs
 
 # Local Functions
 def _main_(args):
@@ -94,6 +95,10 @@ def _main_(args):
 
     if '-m15' in args:
         m15(args)
+        std.sys.exit()
+
+    if '-m16' in args:
+        m16(args)
         std.sys.exit()
 
     if '-m14' in args:
@@ -178,6 +183,11 @@ def help_menu():
     print("         --report             US-018 evidence;  --cleanup deletes the 2 test VMs")
     print("         --diagnose           read-only: where the VPC routes stop (VPC, transit gateway, Tier-0, BGP)")
     print("         --domain NAME        workload domain (default: the first in lab_spec)")
+    print("    -m16 LOG|RTM: (Module 16) Log Management / Real-Time Metrics on the services runtime (US-019).")
+    print("                              Default: plan + preflight (Fleet lifecycle login, DNS, payload validation)")
+    print("         --deploy             validate, deploy (adds services runtime workers, 30-60 min) and follow the task")
+    print("         --status [--wait]    the last deployment task; --wait keeps following it to the end")
+    print("         --report             US-019 evidence;  --force deploys even when validation fails")
     print("")
     print("For further details and documentation, please see https://github.com/boconnor2017/hesiod-theogony")
     print("")
@@ -647,6 +657,34 @@ def m15(args):
     finally:
         print("=========================================================")
         print("Module 15 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m16(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 16")
+    print("=========================================================")
+    part = next((a.upper() for a in args if a.upper() in ("LOG", "RTM")), None)
+    if not part:
+        liblog.print_logs("Usage: -m16 LOG|RTM [--deploy|--status|--report] (see --help)")
+        std.sys.exit(1)
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--deploy" in args:
+            libobs.deploy(lab_spec_py, part, force="--force" in args)
+        elif "--status" in args:
+            libobs.status(lab_spec_py, part, wait="--wait" in args)
+        elif "--report" in args:
+            if libobs.report(lab_spec_py, part)["result"] != "PASS":
+                std.sys.exit(1)
+        elif libobs.plan(lab_spec_py, part):
+            std.sys.exit(1)
+    except (libobs.ObsError, libwld.WldError, libvcf.VcfError, libesxi.EsxiBuildError) as e:
+        liblog.print_logs("Module 16 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 16 runtime is completed.")
         print("=========================================================")
         print("")
 

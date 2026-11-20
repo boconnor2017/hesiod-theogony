@@ -1,0 +1,448 @@
+# Hesiod VCF Log Management and Real-Time Metrics (Module 16)
+# Description: US-019. Deploys the two day-N observability components onto the VCF services runtime through the VCF
+#              Fleet Lifecycle service API (the same call the VCF Operations wizard Build > Lifecycle > VCF Management >
+#              Components > Add Component makes):
+#                LOG  Log Management   componentType OPS_LOGS           (FQDN, size, node count)
+#                RTM  Real-Time Metrics componentType OPS_DATA_PLATFORM
+#              Both add worker nodes to the services runtime (scale-out), so each run needs free addresses in the
+#              runtime's IP pool and spare CPU/RAM in the management cluster.
+# Author: Brendan O'Connor
+# Date: November 2026
+# Version: 1.0
+#
+# API (VCF 9.1): https://<fleet lifecycle FQDN>
+#   POST /api/v1/identity/token (form: grant_type=password, username, password) -> access_token
+#   GET  /fleet-lcm/v1/sddc-lcms                       primary SDDC lifecycle id (isPrimary)
+#   GET  /fleet-lcm/v1/components                      what is deployed (and at which version)
+#   POST /fleet-lcm/v1/components/validations          validate a componentSpecs payload -> task id
+#   POST /fleet-lcm/v1/components                      deploy -> task id
+#   GET  /fleet-lcm/v1/tasks/<id>                      task status
+#
+# lab_spec["observability"] (see json_lib/lab_spec.json):
+#   fleet_lcm_fqdn / fleet_lcm_user   default: the vcf plan's fleet_lcm FQDN, admin@local
+#   log_management.fqdn               "auto" = next free address in the Module 4 DNS range (recorded like -m14/-m15)
+#   log_management.size / .nodes      small / 1 (lab); version "auto" = the version the fleet already runs
+#   real_time_metrics.version         "auto"
+#
+# Public functions
+#   settings(lab_spec, part)          resolve lab_spec (no network calls)
+#   plan(lab_spec, part)              -m16 LOG|RTM: plan + preflight (fleet API, DNS, already deployed?, validation)
+#   deploy(lab_spec, part)            -m16 LOG|RTM --deploy: validate, deploy, follow the task to the end
+#   status(lab_spec, part)            -m16 LOG|RTM --status: the last deployment task (resume watching with --wait)
+#   report(lab_spec, part)            -m16 LOG|RTM --report: US-019 evidence for the part
+#
+# Every failure raises ObsError.
+
+# Import Hesiod Libraries
+from python_lib import logs_and_headers as liblog
+from python_lib import vcf as libvcf
+from python_lib import wld as libwld
+
+# Import Standard Python Libraries
+import collections
+import datetime
+import json
+import os
+import time
+
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+OBS_DIR = "conf/obs"
+EVIDENCE_DIR = "conf/evidence"
+TERMINAL = {"SUCCEEDED", "SUCCESSFUL", "COMPLETED", "COMPLETED_WITH_WARNING", "FAILED", "CANCELLED", "TIMED_OUT", "ERROR"}
+OK = {"SUCCEEDED", "SUCCESSFUL", "COMPLETED", "COMPLETED_WITH_WARNING"}
+DEPLOY_TIMEOUT = 4 * 3600
+PARTS = {
+    "LOG": {"type": "OPS_LOGS", "title": "Log Management", "key": "log_management"},
+    "RTM": {"type": "OPS_DATA_PLATFORM", "title": "Real-Time Metrics", "key": "real_time_metrics"},
+}
+
+
+class ObsError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- Fleet Lifecycle API
+
+class Fleet:
+    def __init__(self, fqdn, user, password):
+        self.fqdn, self.base = fqdn, f"https://{fqdn}"
+        self.user, self.password, self.token = user, password, None
+        self.http = requests.Session()
+        self.http.verify = False
+
+    def login(self):
+        try:
+            r = self.http.post(f"{self.base}/api/v1/identity/token", timeout=30,
+                               data={"grant_type": "password", "username": self.user, "password": self.password},
+                               headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
+        except requests.RequestException as e:
+            raise ObsError(f"Fleet lifecycle {self.fqdn} not reachable: {e.__class__.__name__}")
+        if r.status_code != 200 or "access_token" not in r.text:
+            raise ObsError(f"Fleet lifecycle {self.fqdn}: login as {self.user} failed (HTTP {r.status_code}): {r.text[:200]}")
+        self.token = r.json()["access_token"]
+        return self
+
+    def _call(self, method, path, body=None, ok404=False):
+        for attempt in range(4):
+            if not self.token:
+                self.login()
+            try:
+                r = self.http.request(method, self.base + path, json=body, timeout=120,
+                                      headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json",
+                                               "Content-Type": "application/json"})
+            except requests.RequestException as e:
+                if attempt == 3:
+                    raise ObsError(f"{method} {path}: {e.__class__.__name__}")
+                time.sleep(10)
+                continue
+            if r.status_code == 401 and attempt < 3:
+                self.token = None
+                continue
+            if r.status_code == 404 and ok404:
+                return None
+            if r.status_code >= 500 and attempt < 3:
+                time.sleep(10)
+                continue
+            if r.status_code >= 400:
+                raise ObsError(f"{method} {path}: HTTP {r.status_code}: {_errors(r)}")
+            return r.json() if r.text.strip() else {}
+        raise ObsError(f"{method} {path}: gave up")
+
+    def get(self, path, ok404=False):
+        return self._call("GET", path, ok404=ok404)
+
+    def post(self, path, body):
+        return self._call("POST", path, body)
+
+
+def _errors(r):
+    try:
+        j = r.json()
+    except ValueError:
+        return r.text[:400]
+    msgs = []
+    for k in ("message", "errorMessage", "error", "details"):
+        if isinstance(j.get(k), str):
+            msgs.append(j[k])
+    for e in j.get("errors") or j.get("nestedErrors") or []:
+        if isinstance(e, dict):
+            msgs.append(e.get("message") or e.get("errorCode") or json.dumps(e)[:200])
+    return "; ".join(msgs)[:600] or json.dumps(j)[:400]
+
+
+def _walk(o):
+    """Every dict inside a JSON answer (the component list's exact shape is not documented)."""
+    if isinstance(o, dict):
+        yield o
+        for v in o.values():
+            yield from _walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _walk(v)
+
+
+def _components(fleet):
+    seen = []
+    for d in _walk(fleet.get("/fleet-lcm/v1/components") or {}):
+        ctype = d.get("componentType") or d.get("type")
+        if isinstance(ctype, str) and ctype.isupper():
+            seen.append({"type": ctype, "version": d.get("version"), "fqdn": d.get("fqdn") or d.get("hostname"),
+                         "status": d.get("status") or d.get("state") or d.get("health"), "id": d.get("id")})
+    return seen
+
+
+def _primary_sddc(fleet):
+    lcms = [d for d in _walk(fleet.get("/fleet-lcm/v1/sddc-lcms") or {}) if "isPrimary" in d]
+    p = next((d for d in lcms if d.get("isPrimary")), None)
+    if not p:
+        raise ObsError("no primary SDDC lifecycle in GET /fleet-lcm/v1/sddc-lcms")
+    return p["id"]
+
+
+def _auto_version(comps):
+    """The version the fleet already runs: the most common 4-part version among deployed components."""
+    vs = [str(c["version"]).split("-")[0] for c in comps if c.get("version")]
+    vs = [".".join(v.split(".")[:4]) for v in vs if v.count(".") >= 3]
+    return collections.Counter(vs).most_common(1)[0][0] if vs else None
+
+
+def _task(fleet, tid):
+    return fleet.get(f"/fleet-lcm/v1/tasks/{tid}") or {}
+
+
+def _task_status(t):
+    return str(t.get("status") or t.get("state") or "").upper()
+
+
+def _task_errors(t):
+    msgs = []
+    for d in _walk(t):
+        st = str(d.get("status") or d.get("state") or "").upper()
+        for k in ("errorMessage", "message", "failureMessage"):
+            if isinstance(d.get(k), str) and (st in ("FAILED", "ERROR") or k != "message"):
+                msgs.append(f"{d.get('name') or d.get('description') or ''}: {d[k]}".strip(": "))
+        for e in d.get("errors") or []:
+            if isinstance(e, dict) and e.get("message"):
+                msgs.append(e["message"])
+    out = []
+    for m in msgs:
+        if m not in out:
+            out.append(m)
+    return out
+
+
+def _subtasks(t):
+    return [(d.get("name") or d.get("description"), _task_status(d)) for d in _walk(t.get("subTasks") or t.get("subtasks") or [])
+            if (d.get("name") or d.get("description")) and _task_status(d)]
+
+
+def _follow(fleet, tid, what, timeout_s, poll_s):
+    deadline, last, seen = time.time() + timeout_s, None, {}
+    while True:
+        t = _task(fleet, tid)
+        s = _task_status(t)
+        if s != last:
+            liblog.print_logs(f"    {what}: {s or '?'}")
+            last = s
+        for name, st in _subtasks(t):
+            if seen.get(name) != st:
+                seen[name] = st
+                liblog.print_logs(f"        {st:10} {name}")
+        if s in TERMINAL:
+            return t
+        if time.time() > deadline:
+            raise ObsError(f"{what}: task {tid} still {s} after {timeout_s // 60} min (-m16 ... --status to keep watching)")
+        time.sleep(poll_s)
+
+
+# ---------------------------------------------------------------- settings
+
+def _placeholder(v):
+    return v is None or str(v).startswith("<")
+
+
+def settings(lab_spec, part):
+    part = part.upper()
+    if part not in PARTS:
+        raise ObsError(f"unknown part {part} (LOG or RTM)")
+    o = lab_spec.get("observability") or {}
+    plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
+    fleet_fqdn = o.get("fleet_lcm_fqdn")
+    if _placeholder(fleet_fqdn):
+        if "fleet_lcm" in plan:
+            fleet_fqdn = plan["fleet_lcm"]["fqdns"]["fleet_lcm"]["fqdn"]
+        elif "vsp" in plan:
+            fleet_fqdn = plan["vsp"]["fqdns"]["fleet"]["fqdn"]
+        else:
+            raise ObsError('set observability.fleet_lcm_fqdn (VCF Operations > Build > Lifecycle > VCF Management > Components)')
+    pw = lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]
+    c = o.get(PARTS[part]["key"]) or {}
+    s = {"part": part, **PARTS[part], "fleet_fqdn": fleet_fqdn, "user": o.get("fleet_lcm_user", "admin@local"),
+         "password": pw, "version": None if _placeholder(c.get("version")) or str(c.get("version")).lower() == "auto"
+         else str(c["version"]), "pool": plan.get("vsp", {}).get("pool", []),
+         "nameservers": lab_spec["vcf"].get("nameservers") or lab_spec["domain"].get("server_ips", [])}
+    if part == "LOG":
+        s["size"] = str(c.get("size", "small")).lower()
+        s["nodes"] = int(c.get("nodes", 1))
+        fq = c.get("fqdn", "auto")
+        pf = libwld._plan_file("fleet-logs")
+        if os.path.exists(pf):
+            s["address"], s["recorded"] = json.load(open(pf))["addresses"]["logs"], True
+        elif _placeholder(fq) or str(fq).lower() == "auto":
+            s["address"], s["recorded"] = libwld._allocate(lab_spec, {"name": "fleet-logs"}, ["logs"])["logs"], False
+        else:
+            short = str(fq).split(".")[0]
+            dom = lab_spec["domain"]["name"]
+            ip = next((r["ip"] for r in _dns_records(lab_spec) if r["short"] == short), None)
+            if not ip:
+                raise ObsError(f"observability.log_management.fqdn {fq}: not a Module 4 DNS name")
+            s["address"], s["recorded"] = {"ip": ip, "short": short, "fqdn": f"{short}.{dom}"}, False
+        s["fqdn"] = s["address"]["fqdn"]
+    return s
+
+
+def _dns_records(lab_spec):
+    out = []
+    for f in lab_spec["domain"]["fqdns"]:
+        try:
+            ips = libwld._range(lab_spec["network"][f["assign_ip_from_this_network"]]["default_gateway"],
+                                f["assign_ip_from_this_range_start"], f["assign_ip_from_this_range_end"])
+        except (KeyError, IndexError):
+            continue
+        for ip in ips:
+            short = libwld.libesxi._dns_name_for_ip(lab_spec, ip)
+            if short:
+                out.append({"ip": ip, "short": short})
+    return out
+
+
+def _record(s):
+    pf = libwld._plan_file("fleet-logs")
+    if s["part"] == "LOG" and not os.path.exists(pf):
+        os.makedirs(os.path.dirname(pf), exist_ok=True)
+        with open(pf, "w") as f:
+            json.dump({"name": "fleet-logs", "recorded": time.strftime("%Y-%m-%d %H:%M"),
+                       "addresses": {"logs": s["address"]}}, f, indent=2)
+        liblog.print_logs(f"    Recorded {s['fqdn']} ({s['address']['ip']}) in {pf} (Module 7, 14 and 15 IPAM now skip it).")
+
+
+def _payload(s, sddc_id, version):
+    spec = {"sddcLcmId": sddc_id, "componentType": s["type"], "deploymentType": "VspComponentSpec", "version": version}
+    if s["part"] == "LOG":
+        spec["fqdn"] = s["fqdn"]
+        spec["configSpec"] = {"size": s["size"], "numberOfNodes": s["nodes"]}
+    return {"componentSpecs": [spec]}
+
+
+def _state_file(part):
+    return os.path.join(OBS_DIR, f"{part.lower()}_task.json")
+
+
+def _print_plan(s):
+    liblog.print_logs(f"{s['title']} ({s['type']}) through Fleet lifecycle {s['fleet_fqdn']} as {s['user']}:")
+    if s["part"] == "LOG":
+        liblog.print_logs(f"    FQDN {s['fqdn']} ({s['address']['ip']}){' (recorded)' if s['recorded'] else ''}, "
+                          f"size {s['size']}, {s['nodes']} node(s)")
+    liblog.print_logs(f"    version {s['version'] or 'auto (what the fleet already runs)'}")
+    if s["pool"]:
+        liblog.print_logs(f"    services runtime IP pool {s['pool'][0]}-{s['pool'][-1]} ({len(s['pool'])} addresses): the new "
+                          "worker nodes take their addresses from it")
+
+
+def _connect(s):
+    fleet = Fleet(s["fleet_fqdn"], s["user"], s["password"]).login()
+    sddc = _primary_sddc(fleet)
+    comps = _components(fleet)
+    version = s["version"] or _auto_version(comps)
+    if not version:
+        raise ObsError("could not tell the fleet's version from GET /fleet-lcm/v1/components: set "
+                       f"observability.{s['key']}.version (e.g. 9.1.1.0)")
+    return fleet, sddc, comps, version
+
+
+# ---------------------------------------------------------------- plan / deploy / status
+
+def plan(lab_spec, part):
+    s = settings(lab_spec, part)
+    _print_plan(s)
+    checks = []
+    if s["part"] == "LOG":
+        p = next((f"{n}: {x}" for n in s["nameservers"] for x in [libvcf._dns_check(n, s["fqdn"], s["address"]["ip"])] if x), None)
+        checks.append((f"DNS {s['fqdn']} <-> {s['address']['ip']}", p))
+    try:
+        fleet, sddc, comps, version = _connect(s)
+        checks.append((f"Fleet lifecycle {s['fleet_fqdn']}: login, primary SDDC lifecycle {sddc}", None))
+        liblog.print_logs(f"    deployed components: " + ", ".join(sorted({f"{c['type']} {c['version'] or ''}".strip() for c in comps})))
+        have = [c for c in comps if c["type"] == s["type"]]
+        checks.append((f"{s['title']} not deployed yet", f"already deployed ({have[0].get('fqdn') or have[0].get('status')})" if have else None))
+        if not have:
+            body = _payload(s, sddc, version)
+            liblog.print_logs(f"    validating (version {version}) ...")
+            t = _follow(fleet, fleet.post("/fleet-lcm/v1/components/validations", body)["id"], "validation", 900, 5)
+            ok = _task_status(t) in OK
+            checks.append((f"Fleet lifecycle validation of the {s['type']} payload", None if ok else
+                           "; ".join(_task_errors(t))[:600] or _task_status(t)))
+    except ObsError as e:
+        checks.append(("Fleet lifecycle API", str(e)[:300]))
+    failed = [c for c in checks if c[1]]
+    for n, p in checks:
+        liblog.print_logs(f"  {'FAIL' if p else 'ok  '}  {n}{': ' + p if p else ''}")
+    liblog.print_logs(f"Preflight: {len(checks) - len(failed)} passed, {len(failed)} failed.")
+    return failed
+
+
+def deploy(lab_spec, part, force=False):
+    s = settings(lab_spec, part)
+    _print_plan(s)
+    fleet, sddc, comps, version = _connect(s)
+    if any(c["type"] == s["type"] for c in comps):
+        liblog.print_logs(f"{s['title']} is already deployed: nothing to do (-m16 {s['part']} --report).")
+        return
+    body = _payload(s, sddc, version)
+    liblog.print_logs(f"(1) Validate {s['type']} {version}.")
+    t = _follow(fleet, fleet.post("/fleet-lcm/v1/components/validations", body)["id"], "validation", 900, 5)
+    if _task_status(t) not in OK:
+        errs = _task_errors(t)
+        for e in errs[:10]:
+            liblog.print_logs(f"        {e}")
+        if not force:
+            raise ObsError(f"validation {_task_status(t)}: " + ("; ".join(errs)[:400] or "see above") + " (--force deploys anyway)")
+    _record(s)
+    liblog.print_logs(f"(2) Deploy {s['title']}: adds worker nodes to the services runtime (30-60 min; the runtime's "
+                      "management services may be briefly disrupted).")
+    tid = fleet.post("/fleet-lcm/v1/components", body)["id"]
+    os.makedirs(OBS_DIR, exist_ok=True)
+    with open(_state_file(s["part"]), "w") as f:
+        json.dump({"task": tid, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "payload": body}, f, indent=2)
+    _finish(s, fleet, tid)
+
+
+def _finish(s, fleet, tid):
+    t = _follow(fleet, tid, f"{s['title']} deployment", DEPLOY_TIMEOUT, 60)
+    st = _task_status(t)
+    if st not in OK:
+        errs = _task_errors(t)
+        for e in errs[:12]:
+            liblog.print_logs(f"        {e}")
+        raise ObsError(f"{s['title']} deployment {st} (task {tid}). Retry from VCF Operations > Build > Lifecycle > "
+                       "VCF Management (task details > Retry), or rerun --deploy")
+    liblog.print_logs(f"{s['title']} deployed. -m16 {s['part']} --report writes the US-019 evidence.")
+
+
+def status(lab_spec, part, wait=False):
+    s = settings(lab_spec, part)
+    sf = _state_file(s["part"])
+    if not os.path.exists(sf):
+        raise ObsError(f"no deployment recorded in {sf}: run -m16 {s['part']} --deploy")
+    tid = json.load(open(sf))["task"]
+    fleet = Fleet(s["fleet_fqdn"], s["user"], s["password"]).login()
+    if wait:
+        return _finish(s, fleet, tid)
+    t = _task(fleet, tid)
+    liblog.print_logs(f"{s['title']} deployment task {tid}: {_task_status(t)}")
+    for name, st in _subtasks(t):
+        liblog.print_logs(f"        {st:10} {name}")
+    for e in _task_errors(t)[:12]:
+        liblog.print_logs(f"        {e}")
+
+
+# ---------------------------------------------------------------- report
+
+def report(lab_spec, part):
+    s = settings(lab_spec, part)
+    rep = {"generated": datetime.datetime.now().isoformat(timespec="seconds"),
+           "title": f"US-019 evidence: {s['title']}", "checks": []}
+
+    def add(check, ok, detail=""):
+        rep["checks"].append({"check": check, "result": "PASS" if ok else "FAIL", "detail": detail})
+    fleet, sddc, comps, version = _connect(s)
+    have = [c for c in comps if c["type"] == s["type"]]
+    rep["component"] = have
+    add(f"{s['title']} ({s['type']}) deployed in the fleet", bool(have),
+        ", ".join(f"{c.get('fqdn') or ''} {c.get('version') or ''} {c.get('status') or ''}".strip() for c in have) or "not found")
+    if s["part"] == "LOG":
+        p = next((x for n in s["nameservers"] for x in [libvcf._dns_check(n, s["fqdn"], s["address"]["ip"])] if x), None)
+        add(f"{s['fqdn']} resolves", not p, p or "")
+        try:
+            r = requests.get(f"https://{s['fqdn']}", verify=False, timeout=15, allow_redirects=False)
+            add(f"https://{s['fqdn']} answers", r.status_code < 500, f"HTTP {r.status_code}")
+        except requests.RequestException as e:
+            add(f"https://{s['fqdn']} answers", False, e.__class__.__name__)
+    rep["result"] = "PASS" if all(c["result"] == "PASS" for c in rep["checks"]) else "FAIL"
+    os.makedirs(EVIDENCE_DIR, exist_ok=True)
+    base = os.path.join(EVIDENCE_DIR, f"obs_{s['part'].lower()}_evidence_{datetime.datetime.now():%Y%m%d-%H%M%S}")
+    with open(base + ".json", "w") as f:
+        json.dump(rep, f, indent=2, default=str)
+    L = [f"# {rep['title']}", "", f"Generated {rep['generated']}. Result: **{rep['result']}**.", "",
+         "| Check | Result | Detail |", "|---|---|---|"]
+    L += [f"| {c['check']} | {c['result']} | {str(c['detail']).replace('|', '/')} |" for c in rep["checks"]]
+    with open(base + ".md", "w") as f:
+        f.write("\n".join(L) + "\n")
+    for c in rep["checks"]:
+        liblog.print_logs(f"    {c['result']:4}  {c['check']}{': ' + str(c['detail']) if c['result'] != 'PASS' and c['detail'] else ''}")
+    liblog.print_logs(f"Evidence report: {rep['result']}  ->  {base}.md  (+ .json)")
+    return rep

@@ -39,6 +39,28 @@ You have now deployed the **Hesiod Main Appliance**. Run `sudo python3 hesiod-th
 # Modules: Deploy a VMware Lab Environment
 Using the **Hesiod Main Appliance**, select from the list of modules below and pass parameters accordingly. The source of all configuration details is a file called `lab_spec.json` that is stored in the `conf/` folder. **WARNING: Do not edit or remove any of the files in /json_lib. These are to be COPIED only. Do not edit or remove any of the files in /conf other than lab_spec.json. The files in /conf are used as a configuration database for the modules below.**
 
+| Module   | Description                   |
+|----------|-------------------------------|
+| Module 01 | Create a `lab_spec.json` file |
+| Module 02 | Deploy Kubernetes (K8) |
+| Module 03 | Deploy DNS Server on K8 |
+| Module 04 | Create DNS Zone and FQDNs for VCF |
+| Module 05 | Deploy LDAP Server on K8 |
+| Module 06 | Create LDAP Groups and Users for VCF |
+| Module 07 MGT | Deploy Nested ESXi Hosts (Management) |
+| Module 08 | Deploy VCF Fleet Management Domain |
+| Module 09 | Deploy CyberArk Conjur OSS Server on K8 |
+| Module 10 | Deploy Certificate Authority on K8 and Rotate VCF Certificates |
+| Module 11 | Deploy SFTP Server on K8 and Configure VCF Backups |
+| Module 12 | Deploy KMS Server on K8 and Encrypt vSAN Management Cluster |
+| Module 13 | Audit the Management Domain against VCF Security Compliance Guide |
+| Module 07 VI | Deploy Nested ESXi Hosts (VI) |
+| Module 14 | Deploy a VI Workload Domain |
+| Module 15 | Deploy an Edge and a Hello World VPC with BGP |
+| Module 16 | Deploy Log Management and Realtime Metrics |
+
+
+
 ## Module 1: Create a Lab Spec JSON file
 | Prerequisite | Comments                                     |
 |--------------|----------------------------------------------|
@@ -433,7 +455,4 @@ Validates the VPC.
 sudo python3 hesiod-theogony.py -m15 EDGE --report
 ``` 
 
-(Optional) Deletes the two Hello World vms. 
-```
-sudo python3 hesiod-theogony.py -m15 EDGE --cleanup
-``` 
+## Module 16: Deploy Log Management and Realtime Metrics
