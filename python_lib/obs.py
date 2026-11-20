@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (Fleet lifecycle login from observability.use_these_credentials, like every other module)
+# Version: 1.2 (an empty lab_spec value counts as unset, e.g. fleet_lcm_fqdn: "")
+#         1.1 (Fleet lifecycle login from observability.use_these_credentials, like every other module)
 #         1.0
 #
 # API (VCF 9.1): https://<fleet lifecycle FQDN>
@@ -224,7 +225,7 @@ def _follow(fleet, tid, what, timeout_s, poll_s):
 # ---------------------------------------------------------------- settings
 
 def _placeholder(v):
-    return v is None or str(v).startswith("<")
+    return v is None or not str(v).strip() or str(v).strip().startswith("<")
 
 
 def settings(lab_spec, part):
@@ -251,6 +252,8 @@ def settings(lab_spec, part):
     if _placeholder(auth.get("username")) or _placeholder(auth.get("password")):
         raise ObsError(f"authentication[{ref}] ({auth.get('system')}) still has a <sample> username or password")
     c = o.get(PARTS[part]["key"]) or {}
+    if _placeholder(fleet_fqdn):
+        raise ObsError("the Fleet lifecycle FQDN is empty: set observability.fleet_lcm_fqdn")
     s = {"part": part, **PARTS[part], "fleet_fqdn": fleet_fqdn, "user": auth["username"],
          "password": auth["password"], "version": None if _placeholder(c.get("version")) or str(c.get("version")).lower() == "auto"
          else str(c["version"]), "pool": plan.get("vsp", {}).get("pool", []),
