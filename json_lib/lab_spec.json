@@ -350,6 +350,14 @@
         "fleet_lcm_fqdn" : "<optional: defaults to the services runtime fleet FQDN (VCF Operations > Build > Lifecycle > VCF Management > Components)>",
         "use_these_credentials" : 10,
         "log_management" : { "fqdn" : "auto", "size" : "small", "nodes" : 1, "version" : "auto" },
-        "real_time_metrics" : { "version" : "auto" }
+        "real_time_metrics" : { "version" : "auto" },
+        "depot" : {
+            "depot_store" : "/usr/local/hesiod-depot",
+            "vcfdt_path" : "/usr/local/vcfdt",
+            "vcf_version" : "9.1.1.0",
+            "ops_fqdn" : "<optional: defaults to the vcf plan's VCF Operations node1 FQDN>",
+            "ops_user" : "admin",
+            "use_these_credentials" : 4
+        }
     }
 }

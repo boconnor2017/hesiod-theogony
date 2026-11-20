@@ -185,6 +185,7 @@ def help_menu():
     print("         --domain NAME        workload domain (default: the first in lab_spec)")
     print("    -m16 LOG|RTM: (Module 16) Log Management / Real-Time Metrics on the services runtime (US-019).")
     print("                              Default: plan + preflight (Fleet lifecycle login, DNS, payload validation)")
+    print("         --upload             side-load portal downloads from <depot_store>/inbox into the Fleet depot (no token)")
     print("         --deploy             validate, deploy (adds services runtime workers, 30-60 min) and follow the task")
     print("         --status [--wait]    the last deployment task; --wait keeps following it to the end")
     print("         --report             US-019 evidence;  --force deploys even when validation fails")
@@ -666,11 +667,13 @@ def m16(args):
     print("=========================================================")
     part = next((a.upper() for a in args if a.upper() in ("LOG", "RTM")), None)
     if not part:
-        liblog.print_logs("Usage: -m16 LOG|RTM [--deploy|--status|--report] (see --help)")
+        liblog.print_logs("Usage: -m16 LOG|RTM [--upload|--deploy|--status|--report] (see --help)")
         std.sys.exit(1)
     lab_spec_py = import_lab_configuration_parameters()
     try:
-        if "--deploy" in args:
+        if "--upload" in args:
+            libobs.upload(lab_spec_py, part)
+        elif "--deploy" in args:
             libobs.deploy(lab_spec_py, part, force="--force" in args)
         elif "--status" in args:
             libobs.status(lab_spec_py, part, wait="--wait" in args)

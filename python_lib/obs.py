@@ -8,7 +8,9 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.3 (default Fleet lifecycle FQDN = the services runtime fleet FQDN; login is admin@vsp.local)
+# Version: 1.5 (--upload: side-load portal downloads into the Fleet depot with the VCF Download Tool, no token)
+#         1.4 (hint when the component binary is missing from the fleet depot)
+#         1.3 (default Fleet lifecycle FQDN = the services runtime fleet FQDN; login is admin@vsp.local)
 #         1.2 (an empty lab_spec value counts as unset, e.g. fleet_lcm_fqdn: "")
 #         1.1 (Fleet lifecycle login from observability.use_these_credentials, like every other module)
 #         1.0
@@ -35,6 +37,11 @@
 #   deploy(lab_spec, part)            -m16 LOG|RTM --deploy: validate, deploy, follow the task to the end
 #   status(lab_spec, part)            -m16 LOG|RTM --status: the last deployment task (resume watching with --wait)
 #   report(lab_spec, part)            -m16 LOG|RTM --report: US-019 evidence for the part
+#   upload(lab_spec, part)            -m16 LOG|RTM --upload: side-load binaries downloaded by hand from the Broadcom
+#                                     portal into the Fleet depot (Software Depot in disconnected mode, no token):
+#                                     drop the files in <depot_store>/inbox, the module lays out PROD/COMP/<id>/ and
+#                                     PROD/metadata/..., checks them against productVersionCatalog.json, and runs
+#                                     vcf-download-tool depot binaries upload (VCF Operations login, no token)
 #
 # Every failure raises ObsError.
 
@@ -48,6 +55,8 @@ import collections
 import datetime
 import json
 import os
+import shutil
+import subprocess
 import time
 
 import requests
@@ -61,8 +70,9 @@ TERMINAL = {"SUCCEEDED", "SUCCESSFUL", "COMPLETED", "COMPLETED_WITH_WARNING", "F
 OK = {"SUCCEEDED", "SUCCESSFUL", "COMPLETED", "COMPLETED_WITH_WARNING"}
 DEPLOY_TIMEOUT = 4 * 3600
 PARTS = {
-    "LOG": {"type": "OPS_LOGS", "title": "Log Management", "key": "log_management"},
-    "RTM": {"type": "OPS_DATA_PLATFORM", "title": "Real-Time Metrics", "key": "real_time_metrics"},
+    "LOG": {"type": "OPS_LOGS", "title": "Log Management", "key": "log_management", "depot": ["VRLI"]},
+    "RTM": {"type": "OPS_DATA_PLATFORM", "title": "Real-Time Metrics", "key": "real_time_metrics",
+            "depot": ["VCF_OBSERVABILITY_DATA_PLATFORM", "VCFMS_METRICS_STORE"]},
 }
 
 
@@ -405,6 +415,10 @@ def _finish(s, fleet, tid):
         errs = _task_errors(t)
         for e in errs[:12]:
             liblog.print_logs(f"        {e}")
+        if any("resolve component repository" in e for e in errs):
+            liblog.print_logs(f"    The {s['title']} binary for that version is not in the fleet depot. Download it in VCF Operations >"
+                              " Build > Lifecycle > VCF Management > Binary Management, then set observability."
+                              f"{s['key']}.version to the exact version shown there (validation does not check binaries).")
         raise ObsError(f"{s['title']} deployment {st} (task {tid}). Retry from VCF Operations > Build > Lifecycle > "
                        "VCF Management (task details > Retry), or rerun --deploy")
     liblog.print_logs(f"{s['title']} deployed. -m16 {s['part']} --report writes the US-019 evidence.")
@@ -463,3 +477,155 @@ def report(lab_spec, part):
         liblog.print_logs(f"    {c['result']:4}  {c['check']}{': ' + str(c['detail']) if c['result'] != 'PASS' and c['detail'] else ''}")
     liblog.print_logs(f"Evidence report: {rep['result']}  ->  {base}.md  (+ .json)")
     return rep
+
+
+# ---------------------------------------------------------------- side-load into the Fleet depot (no token)
+
+# metadata file -> paths under the depot store (VCF Download Tool reads both vSAN HCL copies)
+METADATA = {
+    "productVersionCatalog.json": ["PROD/metadata/productVersionCatalog/v1"],
+    "productVersionCatalog.sig": ["PROD/metadata/productVersionCatalog/v1"],
+    "vcfManifest.json": ["PROD/metadata/manifest/v1"],
+    "VmwareCompatibilityData.json": ["PROD/metadata/Compatibility/v1", "PROD/metadata/Compatibility/v2"],
+    "all.json": ["PROD/metadata/vsan/hcl", "PROD/vsan/hcl"],
+    "lastupdatedtime.json": ["PROD/metadata/vsan/hcl", "PROD/vsan/hcl"],
+}
+# file-name prefixes, used only when productVersionCatalog.json does not say which component a file belongs to
+PREFIXES = [("salt-raas-", "VCF_SALT_RAAS"), ("salt-", "VCF_SALT"), ("vcf-fleet-lcm-", "VCF_FLEET_LCM"),
+            ("vcf-sddc-lcm-", "VCF_SDDC_LCM"), ("vcf-fleet-depot-", "DEPOT_SERVICE"), ("vidb-", "VIDB"),
+            ("vcfa-", "VRA"), ("telemetry-acceptor-", "TELEMETRY_ACCEPTOR"), ("vmsp-", "VSP"),
+            ("vcf-services-platform-", "VSP"), ("vcd-migrator-", "VCF_SERVICE_VCD_MIGRATION_BACKEND")]
+KNOWN = {c for _, c in PREFIXES} | {"VROPS", "VRLI", "VRNI", "VCF_OBSERVABILITY_DATA_PLATFORM", "VCFMS_METRICS_STORE",
+                                    "VCENTER", "NSX_T_MANAGER", "SDDC_MANAGER_VCF", "VCF_OPS_CLOUD_PROXY", "VCF_LICENSE_SERVER"}
+
+
+def _depot_settings(lab_spec, s):
+    d = (lab_spec.get("observability") or {}).get("depot") or {}
+    plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
+    ops = d.get("ops_fqdn")
+    if _placeholder(ops):
+        nodes = [v for k, v in plan.get("vcf_operations", {}).get("fqdns", {}).items() if k.startswith("node")]
+        if not nodes:
+            raise ObsError("set observability.depot.ops_fqdn (the VCF Operations FQDN)")
+        ops = nodes[0]["fqdn"]
+    ref = d.get("use_these_credentials", lab_spec["vcf"]["use_these_credentials"])
+    auth = lab_spec["authentication"][int(ref)]
+    user = d.get("ops_user") or "admin"
+    tool = d.get("vcfdt_path") if not _placeholder(d.get("vcfdt_path")) else "/usr/local/vcfdt"
+    exe = os.path.join(tool, "bin", "vcf-download-tool")
+    return {"store": d.get("depot_store") if not _placeholder(d.get("depot_store")) else "/usr/local/hesiod-depot",
+            "exe": exe, "ops": ops, "ops_user": user, "ops_password": auth["password"],
+            "vcf_version": d.get("vcf_version") if not _placeholder(d.get("vcf_version")) else "9.1.1.0",
+            "depot_fqdn": s["fleet_fqdn"]}
+
+
+def _catalog_bundles(store):
+    """INSTALL bundles from productVersionCatalog.json: [{"id", "component", "version", "files": {name: size}}]."""
+    pf = os.path.join(store, "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json")
+    if not os.path.exists(pf):
+        return []
+    out = []
+    for d in _walk(json.load(open(pf))):
+        if isinstance(d.get("binaries"), list) and "id" in d:
+            files = {b["fileName"]: b.get("size") for b in d["binaries"] if isinstance(b, dict) and b.get("fileName")}
+            comp = next((v for v in d.values() if isinstance(v, str) and v in KNOWN), None)
+            if not comp:      # the component id may sit in the bundle id or a binary's path
+                blob = json.dumps(d)
+                comp = next((k for k in sorted(KNOWN, key=len, reverse=True) if f"/{k}/" in blob), None)
+            out.append({"id": d["id"], "type": str(d.get("type", "")).upper(), "component": comp,
+                        "version": d.get("version") or d.get("productVersion"), "files": files})
+    return out
+
+
+def upload(lab_spec, part):
+    s = settings(lab_spec, part)
+    d = _depot_settings(lab_spec, s)
+    store, inbox = d["store"], os.path.join(d["store"], "inbox")
+    if not os.path.isdir(inbox):
+        os.makedirs(inbox, exist_ok=True)
+        raise ObsError(f"created {inbox}: drop the portal downloads there (binaries + metadata) and rerun --upload")
+    if not os.access(d["exe"], os.X_OK):
+        raise ObsError(f"{d['exe']} not found: extract vcf-download-tool-<version>.tar.gz (Broadcom portal > VCF "
+                       "9.1.1 > Drivers & Tools) into observability.depot.vcfdt_path")
+    liblog.print_logs(f"{s['title']}: side-load into the Fleet depot {d['depot_fqdn']} (VCF Operations {d['ops']} as "
+                      f"{d['ops_user']}), depot store {store}, VCF {d['vcf_version']}.")
+
+    # (1) metadata to its fixed paths (catalog first: the binaries are sorted with it)
+    liblog.print_logs("(Upload 1) Metadata.")
+    files = [os.path.join(r, f) for r, _, fs in os.walk(inbox) for f in fs]
+    for f in files:
+        for dest in METADATA.get(os.path.basename(f), []):
+            os.makedirs(os.path.join(store, dest), exist_ok=True)
+            shutil.copy2(f, os.path.join(store, dest, os.path.basename(f)))
+            liblog.print_logs(f"    {os.path.basename(f)} -> {dest}/")
+    bundles = _catalog_bundles(store)
+    if not bundles:
+        liblog.print_logs("    WARNING: no productVersionCatalog.json in the inbox (portal: VCF 9.1.1 metadata). Files are"
+                          " sorted by name only and the upload may skip bundles it cannot match.")
+    owner = {name: b["component"] for b in bundles if b["component"] for name in b["files"]}
+
+    # (2) binaries to PROD/COMP/<component>/ (a subfolder of the inbox named after a component id wins)
+    liblog.print_logs("(Upload 2) Binaries.")
+    unplaced = []
+    for f in files:
+        name = os.path.basename(f)
+        if name in METADATA:
+            continue
+        sub = os.path.basename(os.path.dirname(f))
+        stem = name
+        for pre in ("configuration-schema-", "depot-manifest-"):
+            stem = stem[len(pre):] if stem.startswith(pre) else stem
+        comp = sub if sub in KNOWN else owner.get(name) or next((c for p, c in PREFIXES if stem.startswith(p)), None)
+        if not comp:
+            unplaced.append(name)
+            continue
+        dest = os.path.join(store, "PROD/COMP", comp)
+        os.makedirs(dest, exist_ok=True)
+        if not os.path.exists(os.path.join(dest, name)) or os.path.getsize(os.path.join(dest, name)) != os.path.getsize(f):
+            shutil.copy2(f, os.path.join(dest, name))
+        liblog.print_logs(f"    {name} -> PROD/COMP/{comp}/")
+    for n in unplaced:
+        liblog.print_logs(f"    UNPLACED {n}: move it into inbox/<component id>/ (e.g. inbox/{s['depot'][0]}/) and rerun")
+
+    # (3) check the part's INSTALL bundles against the catalog (a bundle with a missing file is skipped silently)
+    liblog.print_logs("(Upload 3) Check against productVersionCatalog.json.")
+    want = [b for b in bundles if b["component"] in s["depot"] and b["type"] == "INSTALL"]
+    ready = set()
+    for b in want:
+        bad = []
+        for name, size in b["files"].items():
+            p = os.path.join(store, "PROD/COMP", b["component"], name)
+            if not os.path.exists(p):
+                bad.append(f"MISSING {name}")
+            elif size and int(size) != os.path.getsize(p):
+                bad.append(f"WRONG SIZE {name} ({os.path.getsize(p)} != {size})")
+        liblog.print_logs(f"    {'OK  ' if not bad else 'FAIL'}  {b['component']} {b['version'] or ''} ({b['id']})")
+        for x in bad:
+            liblog.print_logs(f"            {x}")
+        if not bad:
+            ready.add(b["component"])
+    comps = sorted(ready) if bundles else [c for c in s["depot"] if os.path.isdir(os.path.join(store, "PROD/COMP", c))]
+    if not comps:
+        raise ObsError(f"nothing complete to upload for {s['title']} ({', '.join(s['depot'])}): see the list above")
+
+    # (4) upload with the VCF Download Tool (answers its certificate prompt in this terminal on the first run)
+    os.makedirs(OBS_DIR, exist_ok=True)
+    pwf = os.path.join(OBS_DIR, ".ops_password")
+    fd = os.open(pwf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(d["ops_password"])
+    common = ["--ops-fqdn", d["ops"], "--ops-auth-source", "LOCAL", "--ops-user", d["ops_user"],
+              "--ops-user-password-file", pwf, "--depot-fqdn", d["depot_fqdn"], "--vcf-version", d["vcf_version"]]
+    try:
+        for c in comps:
+            liblog.print_logs(f"(Upload 4) vcf-download-tool depot binaries upload --component {c}")
+            rc = subprocess.run([d["exe"], "depot", "binaries", "upload", *common, "--sku", "VCF", "--type", "INSTALL",
+                                 "--depot-store", store, "--component", c], cwd=os.path.dirname(d["exe"])).returncode
+            if rc:
+                raise ObsError(f"vcf-download-tool upload of {c} exited {rc} (its log: {os.path.dirname(os.path.dirname(d['exe']))}/log)")
+        liblog.print_logs("(Upload 5) What the Fleet depot now has:")
+        subprocess.run([d["exe"], "depot", "binaries", "list", *common], cwd=os.path.dirname(d["exe"]))
+    finally:
+        os.remove(pwf)
+    liblog.print_logs(f"Set observability.{s['key']}.version to the {s['title']} version listed above, then -m16 "
+                      f"{s['part']} --deploy.")

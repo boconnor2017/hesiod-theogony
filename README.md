@@ -456,3 +456,41 @@ sudo python3 hesiod-theogony.py -m15 EDGE --report
 ``` 
 
 ## Module 16: Deploy Log Management and Realtime Metrics
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 8     | VCF Fleet is deployed.                       |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to access the VCF Fleet deployed in Module 8 and deploy Log Management `LOG` and Realtime Metrics `RTM`. Each option has additional parameters as specified below.
+
+Runs a plan for Log Management.
+```
+sudo python3 hesiod-theogony.py -m16 LOG
+```
+
+Deploys Log Management.
+```
+sudo python3 hesiod-theogony.py -m16 LOG --deploy
+```
+
+Validates Log Management.
+```
+sudo python3 hesiod-theogony.py -m16 LOG --report
+```
+
+Runs a plan for Realtime Metrics.
+```
+sudo python3 hesiod-theogony.py -m16 RTM
+```
+
+Deploys Realtime Metrics.
+```
+sudo python3 hesiod-theogony.py -m16 RTM --deploy
+```
+
+Validates Realtime Metrics.
+```
+sudo python3 hesiod-theogony.py -m16 RTM --report
+```
