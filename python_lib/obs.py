@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (an empty lab_spec value counts as unset, e.g. fleet_lcm_fqdn: "")
+# Version: 1.3 (default Fleet lifecycle FQDN = the services runtime fleet FQDN; login is admin@vsp.local)
+#         1.2 (an empty lab_spec value counts as unset, e.g. fleet_lcm_fqdn: "")
 #         1.1 (Fleet lifecycle login from observability.use_these_credentials, like every other module)
 #         1.0
 #
@@ -22,7 +23,8 @@
 #
 # lab_spec["observability"] (see json_lib/lab_spec.json):
 #   fleet_lcm_fqdn                    default: the vcf plan's fleet_lcm FQDN
-#   use_these_credentials             index into lab_spec["authentication"] (the vcf_fleet_lcm entry: admin@local)
+#   use_these_credentials             index into lab_spec["authentication"] (the vcf_fleet_lcm entry: admin@vsp.local,
+#                                     the services runtime API account)
 #   log_management.fqdn               "auto" = next free address in the Module 4 DNS range (recorded like -m14/-m15)
 #   log_management.size / .nodes      small / 1 (lab); version "auto" = the version the fleet already runs
 #   real_time_metrics.version         "auto"
@@ -236,10 +238,12 @@ def settings(lab_spec, part):
     plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
     fleet_fqdn = o.get("fleet_lcm_fqdn")
     if _placeholder(fleet_fqdn):
-        if "fleet_lcm" in plan:
-            fleet_fqdn = plan["fleet_lcm"]["fqdns"]["fleet_lcm"]["fqdn"]
-        elif "vsp" in plan:
+        # the API answers on the services runtime's fleet FQDN (vspClusterSpec.fleetFqdn); the separate fleet_lcm
+        # hostname in the bring-up spec is not where it listens
+        if "vsp" in plan:
             fleet_fqdn = plan["vsp"]["fqdns"]["fleet"]["fqdn"]
+        elif "fleet_lcm" in plan:
+            fleet_fqdn = plan["fleet_lcm"]["fqdns"]["fleet_lcm"]["fqdn"]
         else:
             raise ObsError('set observability.fleet_lcm_fqdn (VCF Operations > Build > Lifecycle > VCF Management > Components)')
     ref = o.get("use_these_credentials")
