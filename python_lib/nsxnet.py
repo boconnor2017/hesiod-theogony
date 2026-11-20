@@ -7,7 +7,10 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.6 (edge TEP range checked against every NSX IP pool and the TEPs hosts actually use; a new range
+# Version: 1.8 (edge uplink profile MTU = edge.mtu.interface (9000), so edge TEPs take jumbo frames like the hosts)
+#         1.7 (Hello World: any HTTP answer proves Auto-SNAT egress; the TEP test turns SSH on through vCenter
+#              for its run, restores it after, and takes every vxlan-netstack vmk as a TEP)
+#         1.6 (edge TEP range checked against every NSX IP pool and the TEPs hosts actually use; a new range
 #              gets its own pool and existing edges are moved to it on the next EDGE --deploy)
 #         1.5 (--diagnose shows route types, BGP session state and the raw advertised-routes answer)
 #         1.4 (-m15 VPC --diagnose: where the VPC routes stop between VPC, transit gateway, Tier-0 and BGP)
@@ -425,6 +428,8 @@ def _uplinks_profile(edge):
     up = [{"uplink_name": "uplink-1", "uplink_type": "PNIC"}, {"uplink_name": "uplink-2", "uplink_type": "PNIC"}]
     return {"resource_type": "PolicyUplinkHostSwitchProfile", "display_name": edge["uplink_profile"],
             "transport_vlan": edge["tep"]["vlan"],
+            # the edge TEPs' MTU; without it they take NSX's default (1700) and jumbo overlay frames to the edges drop
+            "mtu": edge["interface_mtu"],
             "teaming": {"policy": "LOADBALANCE_SRCID", "active_list": up},
             "named_teamings": [{"name": "uplink-1-only", "policy": "FAILOVER_ORDER", "active_list": [up[0]]},
                                {"name": "uplink-2-only", "policy": "FAILOVER_ORDER", "active_list": [up[1]]}]}
@@ -1118,10 +1123,49 @@ def hello_world(lab_spec, name=None):
     return res
 
 
+def _host_ssh(w, want_on, restore=None):
+    """Start (want_on=True) SSH on the domain's hosts through vCenter; returns {fqdn: was_running}. With restore=
+    that dict, stop it again on the hosts where it was off before."""
+    from pyVmomi import vim
+    from pyVim.connect import Disconnect
+    before = {}
+    si = libwld._vc_connect(w)
+    try:
+        c = si.content
+        view = c.viewManager.CreateContainerView(c.rootFolder, [vim.HostSystem], True)
+        try:
+            hosts = {h.name: h for h in view.view}
+        finally:
+            view.Destroy()
+        for h in w["hosts"]:
+            hs = hosts.get(h["fqdn"]) or hosts.get(h["ip"])
+            if not hs:
+                continue
+            svc = hs.configManager.serviceSystem
+            running = any(x.key == "TSM-SSH" and x.running for x in svc.serviceInfo.service)
+            before[h["fqdn"]] = running
+            try:
+                if want_on and not running:
+                    svc.StartService(id="TSM-SSH")
+                elif restore is not None and not restore.get(h["fqdn"], True) and running:
+                    svc.StopService(id="TSM-SSH")
+            except Exception as e:
+                liblog.print_logs(f"        {h['fqdn']}: SSH {'start' if want_on else 'stop'} failed: {getattr(e, 'msg', e)}")
+    finally:
+        Disconnect(si)
+    return before
+
+
 def tep_jumbo_test(v):
-    """vmkping ++netstack=vxlan -d -s 8972 from every host TEP to every other host TEP and to the edge TEPs."""
+    """vmkping ++netstack=vxlan -d -s 8972 from every host TEP to every other host TEP and to the edge TEPs.
+    SSH is turned on through vCenter for the test and turned off again where it was off."""
     import paramiko
     w = v["edge"]["wld"]
+    try:
+        ssh_before = _host_ssh(w, True)
+    except Exception as e:
+        ssh_before = None
+        liblog.print_logs(f"        SSH could not be turned on through vCenter: {getattr(e, 'msg', e)}")
     nsx = _nsx(v["edge"])
     edge_teps = []
     for a in v["edge"]["addresses"].values():
@@ -1135,13 +1179,11 @@ def tep_jumbo_test(v):
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(h["ip"], username="root", password=h["password"], timeout=15, look_for_keys=False, allow_agent=False)
             _, o, _ = ssh.exec_command("esxcli network ip interface ipv4 get -N vxlan", timeout=30)
-            sub = ipaddress.ip_network(w["tep"]["subnet"])
             teps = []
             for line in o.read().decode().splitlines():   # Name  IPv4 Address  Netmask  Broadcast  Type  Gateway ...
-                parts = line.split()
+                parts = line.split()                       # every vmk on the vxlan netstack is a TEP
                 if len(parts) > 1 and parts[0].startswith("vmk") and parts[1].count(".") == 3:
-                    if ipaddress.ip_address(parts[1]) in sub:
-                        teps.append(parts[1])
+                    teps.append(parts[1])
             hosts[h["fqdn"]] = {"ssh": ssh, "teps": teps}
         except Exception as e:
             hosts[h["fqdn"]] = {"ssh": None, "teps": [], "error": str(e)}
@@ -1161,6 +1203,11 @@ def tep_jumbo_test(v):
             ok = " 0% packet loss" in text or "0.0% packet loss" in text
             results.append({"from": f, "to": ip, "owner": owner, "ok": ok, "detail": text.strip().splitlines()[-1:] or ""})
         x["ssh"].close()
+    if ssh_before:
+        try:
+            _host_ssh(w, False, restore=ssh_before)
+        except Exception as e:
+            liblog.print_logs(f"        SSH not turned back off: {getattr(e, 'msg', e)}")
     good = sum(r["ok"] for r in results)
     liblog.print_logs(f"    jumbo vmkping (8972 bytes, DF) between TEPs: {good}/{len(results)} passed.")
     for f, x in hosts.items():
@@ -1209,12 +1256,15 @@ def vpc_report(lab_spec, name=None):
     else:
         p = hw["private"]
         code = (p.get("output") or "").split()[:1]
-        add(f"Private VM {p['ip']} egresses via Auto-SNAT ({p['url']})", p.get("exit") == 0 and code and code[0][:1] in "23",
-            p.get("output"))
+        # any HTTP status means the request crossed the Tier-0 and came back: the egress test, not the web server's policy
+        ok = p.get("exit") == 0 and bool(code) and code[0] != "000"
+        add(f"Private VM {p['ip']} egresses via Auto-SNAT ({p['url']})", ok,
+            f"HTTP {code[0]} from {' '.join((p.get('output') or '').split()[1:2])}" if ok else p.get("output"))
         add(f"Public VM {hw['public']['ip']} reachable from {hw['public']['ping_from']} (jump01)", hw["public"]["ok"], "")
         t = hw.get("teps") or []
         add("Jumbo vmkping (8972, DF) passes between all TEPs", bool(t) and all(r["ok"] for r in t),
-            f"{sum(r['ok'] for r in t)}/{len(t)} " + "; ".join(f"{r['from']}->{r['to']}" for r in t if not r["ok"])[:300])
+            f"{sum(r['ok'] for r in t)}/{len(t)} " + "; ".join(f"{r['from']}->{r['to']}" if r['to'] else f"{r['from']}: no SSH ({str(r.get('detail'))[:60]})"
+                      for r in t if not r["ok"])[:300])
         rep["hello_world"] = hw
     learned = _bgp_routes(nsx, v["edge"])
     rep["edge_bgp_learned"] = sorted(learned) if learned is not None else None
