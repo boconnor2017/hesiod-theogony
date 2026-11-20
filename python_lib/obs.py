@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (Fleet lifecycle login from observability.use_these_credentials, like every other module)
+#         1.0
 #
 # API (VCF 9.1): https://<fleet lifecycle FQDN>
 #   POST /api/v1/identity/token (form: grant_type=password, username, password) -> access_token
@@ -19,7 +20,8 @@
 #   GET  /fleet-lcm/v1/tasks/<id>                      task status
 #
 # lab_spec["observability"] (see json_lib/lab_spec.json):
-#   fleet_lcm_fqdn / fleet_lcm_user   default: the vcf plan's fleet_lcm FQDN, admin@local
+#   fleet_lcm_fqdn                    default: the vcf plan's fleet_lcm FQDN
+#   use_these_credentials             index into lab_spec["authentication"] (the vcf_fleet_lcm entry: admin@local)
 #   log_management.fqdn               "auto" = next free address in the Module 4 DNS range (recorded like -m14/-m15)
 #   log_management.size / .nodes      small / 1 (lab); version "auto" = the version the fleet already runs
 #   real_time_metrics.version         "auto"
@@ -239,10 +241,18 @@ def settings(lab_spec, part):
             fleet_fqdn = plan["vsp"]["fqdns"]["fleet"]["fqdn"]
         else:
             raise ObsError('set observability.fleet_lcm_fqdn (VCF Operations > Build > Lifecycle > VCF Management > Components)')
-    pw = lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]
+    ref = o.get("use_these_credentials")
+    if ref is None or _placeholder(ref):
+        raise ObsError('set observability.use_these_credentials (index of the "vcf_fleet_lcm" entry in authentication)')
+    try:
+        auth = lab_spec["authentication"][int(ref)]
+    except (IndexError, ValueError, TypeError):
+        raise ObsError(f"observability.use_these_credentials={ref!r}: no such authentication entry")
+    if _placeholder(auth.get("username")) or _placeholder(auth.get("password")):
+        raise ObsError(f"authentication[{ref}] ({auth.get('system')}) still has a <sample> username or password")
     c = o.get(PARTS[part]["key"]) or {}
-    s = {"part": part, **PARTS[part], "fleet_fqdn": fleet_fqdn, "user": o.get("fleet_lcm_user", "admin@local"),
-         "password": pw, "version": None if _placeholder(c.get("version")) or str(c.get("version")).lower() == "auto"
+    s = {"part": part, **PARTS[part], "fleet_fqdn": fleet_fqdn, "user": auth["username"],
+         "password": auth["password"], "version": None if _placeholder(c.get("version")) or str(c.get("version")).lower() == "auto"
          else str(c["version"]), "pool": plan.get("vsp", {}).get("pool", []),
          "nameservers": lab_spec["vcf"].get("nameservers") or lab_spec["domain"].get("server_ips", [])}
     if part == "LOG":

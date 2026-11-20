@@ -44,6 +44,10 @@
         "system" : "openldap_readonly",
         "username" : "readonly",
         "password" : "<sample: VMware123!>"
+    },{
+        "system" : "vcf_fleet_lcm",
+        "username" : "<sample: admin@local>",
+        "password" : "<sample: VMware123!VMware123! (usually the vcf_components password)>"
     }],
 
     "domain" : {
@@ -344,7 +348,7 @@
     }],
     "observability" : {
         "fleet_lcm_fqdn" : "<optional: defaults to the vcf plan's fleet_lcm FQDN (VCF Operations > Build > Lifecycle > VCF Management > Components)>",
-        "fleet_lcm_user" : "admin@local",
+        "use_these_credentials" : 10,
         "log_management" : { "fqdn" : "auto", "size" : "small", "nodes" : 1, "version" : "auto" },
         "real_time_metrics" : { "version" : "auto" }
     }
