@@ -8,7 +8,9 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.5 (--upload: side-load portal downloads into the Fleet depot with the VCF Download Tool, no token)
+# Version: 1.6 (--upload reads depot_store itself: no inbox; multi-GB files hard-linked, not copied;
+#              a download that is already a depot file (PROD/...) is uploaded as is)
+#         1.5 (--upload: side-load portal downloads into the Fleet depot with the VCF Download Tool, no token)
 #         1.4 (hint when the component binary is missing from the fleet depot)
 #         1.3 (default Fleet lifecycle FQDN = the services runtime fleet FQDN; login is admin@vsp.local)
 #         1.2 (an empty lab_spec value counts as unset, e.g. fleet_lcm_fqdn: "")
@@ -39,7 +41,7 @@
 #   report(lab_spec, part)            -m16 LOG|RTM --report: US-019 evidence for the part
 #   upload(lab_spec, part)            -m16 LOG|RTM --upload: side-load binaries downloaded by hand from the Broadcom
 #                                     portal into the Fleet depot (Software Depot in disconnected mode, no token):
-#                                     drop the files in <depot_store>/inbox, the module lays out PROD/COMP/<id>/ and
+#                                     drop the files in <depot_store>, the module lays out PROD/COMP/<id>/ and
 #                                     PROD/metadata/..., checks them against productVersionCatalog.json, and runs
 #                                     vcf-download-tool depot binaries upload (VCF Operations login, no token)
 #
@@ -494,7 +496,9 @@ METADATA = {
 PREFIXES = [("salt-raas-", "VCF_SALT_RAAS"), ("salt-", "VCF_SALT"), ("vcf-fleet-lcm-", "VCF_FLEET_LCM"),
             ("vcf-sddc-lcm-", "VCF_SDDC_LCM"), ("vcf-fleet-depot-", "DEPOT_SERVICE"), ("vidb-", "VIDB"),
             ("vcfa-", "VRA"), ("telemetry-acceptor-", "TELEMETRY_ACCEPTOR"), ("vmsp-", "VSP"),
-            ("vcf-services-platform-", "VSP"), ("vcd-migrator-", "VCF_SERVICE_VCD_MIGRATION_BACKEND")]
+            ("vcf-services-platform-", "VSP"), ("vcd-migrator-", "VCF_SERVICE_VCD_MIGRATION_BACKEND"),
+            ("operations-logs-", "VRLI"), ("vcf-obs-data-platform-", "VCF_OBSERVABILITY_DATA_PLATFORM"),
+            ("vcfms-metrics-store-", "VCFMS_METRICS_STORE"), ("metrics-store-", "VCFMS_METRICS_STORE")]
 KNOWN = {c for _, c in PREFIXES} | {"VROPS", "VRLI", "VRNI", "VCF_OBSERVABILITY_DATA_PLATFORM", "VCFMS_METRICS_STORE",
                                     "VCENTER", "NSX_T_MANAGER", "SDDC_MANAGER_VCF", "VCF_OPS_CLOUD_PROXY", "VCF_LICENSE_SERVER"}
 
@@ -537,36 +541,66 @@ def _catalog_bundles(store):
     return out
 
 
+def _depot_file(path):
+    """True when a downloaded archive is already a VCF Download Tool depot file (its tree starts at PROD/)."""
+    import tarfile
+    if not path.endswith((".tar", ".tgz", ".tar.gz")):
+        return False
+    try:
+        with tarfile.open(path, "r:*") as t:
+            first = t.next()
+        return bool(first) and first.name.lstrip("./").startswith("PROD")
+    except (tarfile.TarError, OSError):
+        return False
+
+
+def _place(src, dest_dir):
+    """Hard-link (no second copy of multi-GB files) or copy src into dest_dir."""
+    os.makedirs(dest_dir, exist_ok=True)
+    dst = os.path.join(dest_dir, os.path.basename(src))
+    if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
+        return
+    if os.path.exists(dst):
+        os.remove(dst)
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 def upload(lab_spec, part):
     s = settings(lab_spec, part)
     d = _depot_settings(lab_spec, s)
-    store, inbox = d["store"], os.path.join(d["store"], "inbox")
-    if not os.path.isdir(inbox):
-        os.makedirs(inbox, exist_ok=True)
-        raise ObsError(f"created {inbox}: drop the portal downloads there (binaries + metadata) and rerun --upload")
+    store = d["store"]
+    if not os.path.isdir(store):
+        raise ObsError(f"observability.depot.depot_store {store} does not exist")
     if not os.access(d["exe"], os.X_OK):
         raise ObsError(f"{d['exe']} not found: extract vcf-download-tool-<version>.tar.gz (Broadcom portal > VCF "
                        "9.1.1 > Drivers & Tools) into observability.depot.vcfdt_path")
     liblog.print_logs(f"{s['title']}: side-load into the Fleet depot {d['depot_fqdn']} (VCF Operations {d['ops']} as "
                       f"{d['ops_user']}), depot store {store}, VCF {d['vcf_version']}.")
 
-    # (1) metadata to its fixed paths (catalog first: the binaries are sorted with it)
+    # what was dropped: files at the top of depot_store, plus subfolders named after a component id
+    files = [os.path.join(store, f) for f in sorted(os.listdir(store)) if os.path.isfile(os.path.join(store, f))]
+    for sub in sorted(os.listdir(store)):
+        if sub in KNOWN and os.path.isdir(os.path.join(store, sub)):
+            files += [os.path.join(store, sub, f) for f in sorted(os.listdir(os.path.join(store, sub)))
+                      if os.path.isfile(os.path.join(store, sub, f))]
+
+    # (1) metadata to its fixed paths (the catalog sorts and checks the binaries)
     liblog.print_logs("(Upload 1) Metadata.")
-    files = [os.path.join(r, f) for r, _, fs in os.walk(inbox) for f in fs]
     for f in files:
         for dest in METADATA.get(os.path.basename(f), []):
-            os.makedirs(os.path.join(store, dest), exist_ok=True)
-            shutil.copy2(f, os.path.join(store, dest, os.path.basename(f)))
+            _place(f, os.path.join(store, dest))
             liblog.print_logs(f"    {os.path.basename(f)} -> {dest}/")
     bundles = _catalog_bundles(store)
     if not bundles:
-        liblog.print_logs("    WARNING: no productVersionCatalog.json in the inbox (portal: VCF 9.1.1 metadata). Files are"
-                          " sorted by name only and the upload may skip bundles it cannot match.")
+        liblog.print_logs("    no productVersionCatalog.json: binaries are matched by file name and not size-checked.")
     owner = {name: b["component"] for b in bundles if b["component"] for name in b["files"]}
 
-    # (2) binaries to PROD/COMP/<component>/ (a subfolder of the inbox named after a component id wins)
-    liblog.print_logs("(Upload 2) Binaries.")
-    unplaced = []
+    # (2) this part's binaries to PROD/COMP/<component>/ (other files in depot_store are left alone)
+    liblog.print_logs(f"(Upload 2) {s['title']} binaries ({', '.join(s['depot'])}).")
+    mine, depot_files = [], []
     for f in files:
         name = os.path.basename(f)
         if name in METADATA:
@@ -576,20 +610,26 @@ def upload(lab_spec, part):
         for pre in ("configuration-schema-", "depot-manifest-"):
             stem = stem[len(pre):] if stem.startswith(pre) else stem
         comp = sub if sub in KNOWN else owner.get(name) or next((c for p, c in PREFIXES if stem.startswith(p)), None)
-        if not comp:
-            unplaced.append(name)
+        if comp not in s["depot"]:
             continue
-        dest = os.path.join(store, "PROD/COMP", comp)
-        os.makedirs(dest, exist_ok=True)
-        if not os.path.exists(os.path.join(dest, name)) or os.path.getsize(os.path.join(dest, name)) != os.path.getsize(f):
-            shutil.copy2(f, os.path.join(dest, name))
+        if _depot_file(f):
+            depot_files.append(f)
+            liblog.print_logs(f"    {name}: a ready-made depot file (uploaded as is)")
+            continue
+        _place(f, os.path.join(store, "PROD/COMP", comp))
+        mine.append(comp)
         liblog.print_logs(f"    {name} -> PROD/COMP/{comp}/")
-    for n in unplaced:
-        liblog.print_logs(f"    UNPLACED {n}: move it into inbox/<component id>/ (e.g. inbox/{s['depot'][0]}/) and rerun")
+    if not mine and not depot_files:
+        raise ObsError(f"no {s['title']} binaries in {store}: expected files starting with "
+                       + " or ".join(p for p, c in PREFIXES if c in s["depot"])
+                       + f" (or put them in a subfolder named {s['depot'][0]})")
 
     # (3) check the part's INSTALL bundles against the catalog (a bundle with a missing file is skipped silently)
     liblog.print_logs("(Upload 3) Check against productVersionCatalog.json.")
-    want = [b for b in bundles if b["component"] in s["depot"] and b["type"] == "INSTALL"]
+    want = [b for b in bundles if b["component"] in s["depot"] and b["type"] == "INSTALL"
+            and any(os.path.exists(os.path.join(store, "PROD/COMP", b["component"], n)) for n in b["files"])]
+    if mine and not want:
+        liblog.print_logs("    the catalog has no INSTALL bundle for these files: uploading them unchecked.")
     ready = set()
     for b in want:
         bad = []
@@ -604,8 +644,8 @@ def upload(lab_spec, part):
             liblog.print_logs(f"            {x}")
         if not bad:
             ready.add(b["component"])
-    comps = sorted(ready) if bundles else [c for c in s["depot"] if os.path.isdir(os.path.join(store, "PROD/COMP", c))]
-    if not comps:
+    comps = sorted(ready) if want else sorted(set(mine))
+    if not comps and not depot_files:
         raise ObsError(f"nothing complete to upload for {s['title']} ({', '.join(s['depot'])}): see the list above")
 
     # (4) upload with the VCF Download Tool (answers its certificate prompt in this terminal on the first run)
@@ -617,6 +657,12 @@ def upload(lab_spec, part):
     common = ["--ops-fqdn", d["ops"], "--ops-auth-source", "LOCAL", "--ops-user", d["ops_user"],
               "--ops-user-password-file", pwf, "--depot-fqdn", d["depot_fqdn"], "--vcf-version", d["vcf_version"]]
     try:
+        for f in depot_files:
+            liblog.print_logs(f"(Upload 4) vcf-download-tool depot binaries upload --depot-file {os.path.basename(f)}")
+            rc = subprocess.run([d["exe"], "depot", "binaries", "upload", *[x for x in common if x not in ("--vcf-version",
+                                 d["vcf_version"])], "--depot-file", f], cwd=os.path.dirname(d["exe"])).returncode
+            if rc:
+                raise ObsError(f"vcf-download-tool upload of {os.path.basename(f)} exited {rc}")
         for c in comps:
             liblog.print_logs(f"(Upload 4) vcf-download-tool depot binaries upload --component {c}")
             rc = subprocess.run([d["exe"], "depot", "binaries", "upload", *common, "--sku", "VCF", "--type", "INSTALL",
