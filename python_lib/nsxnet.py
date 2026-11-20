@@ -7,7 +7,9 @@
 #              Everything goes through the NSX Policy API of the workload domain's NSX (nsx-w01) and the domain's vCenter.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.5 (--diagnose shows route types, BGP session state and the raw advertised-routes answer)
+# Version: 1.6 (edge TEP range checked against every NSX IP pool and the TEPs hosts actually use; a new range
+#              gets its own pool and existing edges are moved to it on the next EDGE --deploy)
+#         1.5 (--diagnose shows route types, BGP session state and the raw advertised-routes answer)
 #         1.4 (-m15 VPC --diagnose: where the VPC routes stop between VPC, transit gateway, Tier-0 and BGP)
 #         1.3 (Hello World: diagnostics when egress fails, TEP test details, no crash after the vCenter logout)
 #         1.2 (idempotent reruns: existing objects are updated with PUT + _revision, not PATCHed)
@@ -188,7 +190,7 @@ def edge_settings(lab_spec, name=None):
     if len(tep_range) < count * 2:
         raise NetError(f"edge.tep range has {len(tep_range)} address(es); {count} edges x 2 uplinks need {count * 2}")
     host_tep = w["tep"]
-    if host_tep["subnet"] == tep["cidr"] and set(host_tep["range"]) & set(tep_range):
+    if set(host_tep["range"]) & set(tep_range):
         raise NetError(f"edge.tep range overlaps the workload domain host TEP range {host_tep['range'][0]}-{host_tep['range'][-1]}")
     uplinks = []
     for j, u in enumerate(e.get("uplinks") or []):
@@ -219,7 +221,8 @@ def edge_settings(lab_spec, name=None):
         "interface_mtu": int(mtu.get("interface", 9000)), "gateway_mtu": int(mtu.get("global_gateway", 8800)),
         "prefix_list": e.get("inbound_prefix_list", "pl-default-only"),
         # NSX objects (ids)
-        "uplink_profile": f"{ec}-uplink-profile", "tep_pool": f"{ec}-tep-pool",
+        "uplink_profile": f"{ec}-uplink-profile", "tep_pool": f"{ec}-tep-pool-{tep_range[0].split('.')[-1]}-{tep_range[-1].split('.')[-1]}",
+        "tep_pool_prefix": f"{ec}-tep-pool",
         "uplink_tz": f"{ec}-uplink-tz", "trunks": [f"{ec}-trunk-a", f"{ec}-trunk-b"],
         "uplink_segments": [f"{ec}-uplink-{u['label']}" for u in uplinks],
         "host_overlay_tz": f"{root}-{wname}-overlay-tz", "host_vlan_tz": f"{root}-{wname}-vlan-tz",
@@ -359,6 +362,11 @@ def edge_plan(lab_spec, name=None):
             checks.append((f"transport zone {tz}", None if _tz(nsx, tz, kind) else "not found"))
         _compute_manager(nsx, edge["wld"]["addresses"]["vcenter"]["fqdn"])
         checks.append(("vCenter is NSX's compute manager", None))
+        for a in edge["addresses"].values():
+            _edge_state(nsx, a["short"])          # learn the edges' own ids so their TEPs are not reported
+        c = _tep_conflicts(nsx, edge)
+        checks.append((f"edge TEP range {edge['tep_range'][0]}-{edge['tep_range'][-1]} not used elsewhere in NSX",
+                       ("; ".join(c[:4]) + (f" (+{len(c) - 4} more)" if len(c) > 4 else "")) if c else None))
     except NetError as e:
         checks.append(("NSX objects", str(e)[:200]))
     try:
@@ -451,6 +459,47 @@ def _edge_state(nsx, eid):
         return {}
 
 
+def _tep_conflicts(nsx, edge):
+    """Edge TEP addresses already claimed elsewhere: by another NSX IP pool's ranges (e.g. the host TEP pool SDDC
+    Manager created in -m14) or by a TEP a host transport node actually uses. Returns ["ip: owner", ...]."""
+    want = set(edge["tep_range"])
+    found = {}
+
+    def ranges(pool, subnets):
+        for sn in subnets:
+            for r in sn.get("allocation_ranges") or []:
+                try:
+                    a, b = ipaddress.ip_address(r["start"]), ipaddress.ip_address(r["end"])
+                except (KeyError, ValueError):
+                    continue
+                for ip in want:
+                    if a <= ipaddress.ip_address(ip) <= b:
+                        found.setdefault(ip, set()).add(f"IP pool {pool}")
+    for p in nsx.results("/infra/ip-pools"):
+        if p.get("id", "").startswith(edge["tep_pool_prefix"]):
+            continue
+        ranges(p.get("display_name") or p["id"], nsx.results(f"/infra/ip-pools/{p['id']}/ip-subnets"))
+    try:
+        for p in (nsx.get("/api/v1/pools/ip-pools") or {}).get("results") or []:
+            if not (p.get("display_name") or "").startswith(edge["tep_pool_prefix"]):
+                ranges(p.get("display_name") or p.get("id"), p.get("subnets") or [])
+    except NetError:
+        pass
+    # TEPs in use on host transport nodes (edges excluded)
+    edge_ids = {_MP_IDS.get(a["short"]) for a in edge["addresses"].values()}
+    try:
+        for st in nsx.results("/api/v1/transport-nodes/state"):
+            if st.get("transport_node_id") in edge_ids:
+                continue
+            for hs in st.get("host_switch_states") or []:
+                for ep in hs.get("endpoints") or []:
+                    if ep.get("ip") in want:
+                        found.setdefault(ep["ip"], set()).add(f"host TEP on transport node {st.get('transport_node_id')}")
+    except NetError:
+        pass
+    return [f"{ip}: {', '.join(sorted(o))}" for ip, o in sorted(found.items(), key=lambda x: ipaddress.ip_address(x[0]))]
+
+
 def _wait_edges(nsx, ids):
     deadline = time.time() + EDGE_TIMEOUT
     last = {}
@@ -518,6 +567,13 @@ def edge_deploy(lab_spec, name=None):
     cm = _compute_manager(nsx, w["addresses"]["vcenter"]["fqdn"])
     vc = _vc_objects(edge)
 
+    for a in edge["addresses"].values():
+        _edge_state(nsx, a["short"])
+    conflicts = _tep_conflicts(nsx, edge)
+    if conflicts:
+        raise NetError(f"edge TEP range {edge['tep_range'][0]}-{edge['tep_range'][-1]} is already in use: "
+                       + "; ".join(conflicts) + ". Pick edge.tep range_start/range_end outside it in lab_spec.")
+
     liblog.print_logs("(Edge 1) Uplink profile, edge TEP pool, edge uplink transport zone, trunk and uplink segments.")
     nsx.ensure(f"/infra/host-switch-profiles/{edge['uplink_profile']}", _uplinks_profile(edge))
     nsx.ensure(f"/infra/ip-pools/{edge['tep_pool']}", {"display_name": edge["tep_pool"]})
@@ -544,8 +600,21 @@ def edge_deploy(lab_spec, name=None):
     for i, (k, a) in enumerate(edge["addresses"].items()):
         eid = a["short"]
         ids.append(eid)
-        if nsx.get(f"{EP}/edge-transport-nodes/{eid}", ok404=True):
-            liblog.print_logs(f"    {eid}: already defined in NSX.")
+        cur = nsx.get(f"{EP}/edge-transport-nodes/{eid}", ok404=True)
+        if cur:
+            pool = f"/infra/ip-pools/{edge['tep_pool']}"
+            moved = False
+            for sw in (cur.get("switch_spec") or {}).get("switches") or []:
+                for te in sw.get("tunnel_endpoints") or []:
+                    for spec in te.get("ip_assignment_specs") or []:
+                        if spec.get("ip_assignment_type") == "StaticIpv4Pool" and spec.get("ip_pool") != pool:
+                            spec["ip_pool"] = pool
+                            moved = True
+            if moved:
+                nsx.put(f"{EP}/edge-transport-nodes/{eid}", cur)
+                liblog.print_logs(f"    {eid}: TEPs moved to {edge['tep_pool']} ({edge['tep_range'][0]}-{edge['tep_range'][-1]}).")
+            else:
+                liblog.print_logs(f"    {eid}: already defined in NSX.")
             continue
         body = {
             "resource_type": "PolicyEdgeTransportNode", "display_name": eid, "hostname": a["fqdn"],
@@ -576,6 +645,15 @@ def edge_deploy(lab_spec, name=None):
         liblog.print_logs(f"    {eid}: deployment started ({a['fqdn']}, {a['ip']}).")
     _wait_edges(nsx, ids)
     _anti_affinity(edge, ids)
+    for p in nsx.results("/infra/ip-pools"):     # earlier edge TEP pools, once the edges have left them
+        if p["id"].startswith(edge["tep_pool_prefix"]) and p["id"] != edge["tep_pool"]:
+            try:
+                for sn in nsx.results(f"/infra/ip-pools/{p['id']}/ip-subnets"):
+                    nsx.delete(f"/infra/ip-pools/{p['id']}/ip-subnets/{sn['id']}")
+                nsx.delete(f"/infra/ip-pools/{p['id']}")
+                liblog.print_logs(f"    old edge TEP pool {p['id']} removed.")
+            except NetError as e:
+                liblog.print_logs(f"    WARNING: old edge TEP pool {p['id']} not removed yet ({str(e)[:160]}); the next --deploy retries.")
 
     liblog.print_logs(f"(Edge 3) Edge cluster {edge['edge_cluster']}.")
     ec_path = f"{EP}/edge-clusters/{edge['edge_cluster']}"
@@ -743,6 +821,8 @@ def edge_report(lab_spec, name=None):
         st = _edge_state(nsx, eid)
         add(f"Edge {eid} deployed and ready", st.get("state") == "success",
             f"{st.get('state')}/{(st.get('node_deployment_state') or {}).get('state')}")
+    c = _tep_conflicts(nsx, edge)
+    add(f"Edge TEPs {edge['tep_range'][0]}-{edge['tep_range'][-1]} not used elsewhere", not c, "; ".join(c[:4]))
     bgp = _bgp_status(nsx, edge)
     rep["bgp"] = bgp
     for u in edge["uplinks"]:
