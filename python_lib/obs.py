@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.7 (VCF Download Tool gets absolute paths: it runs from its own bin/ folder)
+# Version: 1.8 (stop before the upload when productVersionCatalog.json is missing: the tool requires it)
+#         1.7 (VCF Download Tool gets absolute paths: it runs from its own bin/ folder)
 #         1.6 (--upload reads depot_store itself: no inbox; multi-GB files hard-linked, not copied;
 #              a download that is already a depot file (PROD/...) is uploaded as is)
 #         1.5 (--upload: side-load portal downloads into the Fleet depot with the VCF Download Tool, no token)
@@ -629,6 +630,10 @@ def upload(lab_spec, part):
     liblog.print_logs("(Upload 3) Check against productVersionCatalog.json.")
     want = [b for b in bundles if b["component"] in s["depot"] and b["type"] == "INSTALL"
             and any(os.path.exists(os.path.join(store, "PROD/COMP", b["component"], n)) for n in b["files"])]
+    if mine and not bundles:
+        raise ObsError(f"VCF Download Tool needs productVersionCatalog.json (+ .sig) in {store} to upload binaries from a "
+                       "depot store: download the VCF 9.1.1 metadata files from the Broadcom portal (productVersionCatalog"
+                       ".json, productVersionCatalog.sig, vcfManifest.json) into it and rerun --upload")
     if mine and not want:
         liblog.print_logs("    the catalog has no INSTALL bundle for these files: uploading them unchecked.")
     ready = set()
