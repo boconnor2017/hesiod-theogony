@@ -8,7 +8,9 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.8 (stop before the upload when productVersionCatalog.json is missing: the tool requires it)
+# Version: 1.9 (catalog bundles carry only id/type/name/binaries: component from the enclosing key or the
+#              file names, so the 4-file bundle check works)
+#         1.8 (stop before the upload when productVersionCatalog.json is missing: the tool requires it)
 #         1.7 (VCF Download Tool gets absolute paths: it runs from its own bin/ folder)
 #         1.6 (--upload reads depot_store itself: no inbox; multi-GB files hard-linked, not copied;
 #              a download that is already a depot file (PROD/...) is uploaded as is)
@@ -525,21 +527,37 @@ def _depot_settings(lab_spec, s):
             "depot_fqdn": s["fleet_fqdn"]}
 
 
+def _prefix_component(name):
+    stem = name
+    for pre in ("configuration-schema-", "depot-manifest-"):
+        stem = stem[len(pre):] if stem.startswith(pre) else stem
+    return next((c for p, c in PREFIXES if stem.startswith(p)), None)
+
+
 def _catalog_bundles(store):
-    """INSTALL bundles from productVersionCatalog.json: [{"id", "component", "version", "files": {name: size}}]."""
+    """Bundles from productVersionCatalog.json: [{"id", "type", "component", "path", "files": {name: size}}].
+    A bundle only carries id/type/name/binaries, so its component comes from an enclosing key or field when one is a
+    known component id, otherwise from its file names."""
     pf = os.path.join(store, "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json")
     if not os.path.exists(pf):
         return []
     out = []
-    for d in _walk(json.load(open(pf))):
-        if isinstance(d.get("binaries"), list) and "id" in d:
-            files = {b["fileName"]: b.get("size") for b in d["binaries"] if isinstance(b, dict) and b.get("fileName")}
-            comp = next((v for v in d.values() if isinstance(v, str) and v in KNOWN), None)
-            if not comp:      # the component id may sit in the bundle id or a binary's path
-                blob = json.dumps(d)
-                comp = next((k for k in sorted(KNOWN, key=len, reverse=True) if f"/{k}/" in blob), None)
-            out.append({"id": d["id"], "type": str(d.get("type", "")).upper(), "component": comp,
-                        "version": d.get("version") or d.get("productVersion"), "files": files})
+
+    def walk(o, path, ctx):
+        if isinstance(o, dict):
+            here = next((v for v in o.values() if isinstance(v, str) and v in KNOWN), None) or ctx
+            if isinstance(o.get("binaries"), list) and "id" in o:
+                files = {x["fileName"]: x.get("size") for x in o["binaries"] if isinstance(x, dict) and x.get("fileName")}
+                comp = here or next((_prefix_component(f) for f in files if _prefix_component(f)), None)
+                out.append({"id": o["id"], "type": str(o.get("type", "")).upper(), "component": comp,
+                            "path": "/".join(path), "version": o.get("version") or o.get("productVersion"),
+                            "files": files})
+            for k, v in o.items():
+                walk(v, path + [str(k)], (k if k in KNOWN else here))
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                walk(v, path + [str(i)], ctx)
+    walk(json.load(open(pf)), [], None)
     return out
 
 
@@ -645,7 +663,8 @@ def upload(lab_spec, part):
                 bad.append(f"MISSING {name}")
             elif size and int(size) != os.path.getsize(p):
                 bad.append(f"WRONG SIZE {name} ({os.path.getsize(p)} != {size})")
-        liblog.print_logs(f"    {'OK  ' if not bad else 'FAIL'}  {b['component']} {b['version'] or ''} ({b['id']})")
+        liblog.print_logs(f"    {'OK  ' if not bad else 'FAIL'}  {b['component']} INSTALL bundle {b['id']} "
+                          f"(catalog path {b['path']}): {', '.join(sorted(b['files']))}")
         for x in bad:
             liblog.print_logs(f"            {x}")
         if not bad:
