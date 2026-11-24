@@ -8,7 +8,8 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.10 (--configure: ESX syslog to Log Management (KB workaround), alert email plugin + Critical rule;
+# Version: 1.11 (email plugin fields from GET /alertplugins/types/StandardEmailPlugin; --discover saves it)
+#         1.10 (--configure: ESX syslog to Log Management (KB workaround), alert email plugin + Critical rule;
 #              --report: PASS/FAIL/MANUAL/EXCEPTION rows, KB numbers cited; --discover: save the VCF Operations API spec)
 #         1.9 (catalog bundles carry only id/type/name/binaries: component from the enclosing key or the
 #              file names, so the 4-file bundle check works)
@@ -799,13 +800,22 @@ def _email_plugin_body(ops, a, existing=None):
             "REQUIRES_AUTHENTICATION": "true", "SMTP_HOST": a["host"], "SMTP_PORT": str(a["port"]),
             "SENDER_EMAIL": a["sender"], "SENDER_NAME": "Hesiod VCF Operations", "USERNAME": a["user"],
             "PASSWORD": a["password"], "CONNECTION_TIMEOUT": "30"}
-    try:      # keep only the fields this build's email plugin type declares, when it says
-        t = next((d for d in _walk(ops.call("GET", "/api/alertplugins/types")) if d.get("pluginTypeId") == "StandardEmailPlugin"), None)
-        names = {x.get("name") for x in _walk(t or {}) if isinstance(x.get("name"), str) and x.get("name").isupper()}
-        if names:
-            vals = {k: v for k, v in vals.items() if k in names}
-    except ObsError:
-        pass
+    # the type's own field list (GET /alertplugins/types only lists type names; the detail is per type)
+    t = ops.call("GET", "/api/alertplugins/types/StandardEmailPlugin", ok404=True) or {}
+    fields = [d for d in _walk(t) if isinstance(d.get("name") or d.get("key"), str)
+              and str(d.get("name") or d.get("key")).replace("_", "").isupper()]
+    names = {str(d.get("name") or d.get("key")) for d in fields}
+    if names:
+        unknown = [k for k in vals if k not in names]
+        vals = {k: v for k, v in vals.items() if k in names}
+        required = {str(d.get("name") or d.get("key")) for d in fields
+                    if str(d.get("required", d.get("isRequired", d.get("mandatory", "")))).lower() == "true"}
+        missing = sorted(required - set(vals))
+        if unknown:
+            liblog.print_logs(f"    fields this build does not declare (left out): {', '.join(unknown)}")
+        if missing:
+            raise ObsError(f"StandardEmailPlugin needs fields Theogony does not fill: {', '.join(missing)} "
+                           "(send conf/obs/ops_alertplugin_email_type.json from -m16 LOG --discover)")
     body = {"pluginTypeId": "StandardEmailPlugin", "name": a["name"],
             "configValues": [{"name": k, "value": v} for k, v in vals.items()]}
     if existing:
@@ -994,7 +1004,9 @@ def discover(lab_spec):
             open(f, "w").write(r.text)
             saved.append(f"{f} (from /suite-api{path})")
             break
-    for name, path in (("ops_alertplugin_types.json", "/api/alertplugins/types"), ("ops_alertplugins.json", "/api/alertplugins"),
+    for name, path in (("ops_alertplugin_types.json", "/api/alertplugins/types"),
+                       ("ops_alertplugin_email_type.json", "/api/alertplugins/types/StandardEmailPlugin"),
+                       ("ops_alertplugins.json", "/api/alertplugins"),
                        ("ops_notification_rules.json", "/api/notifications/rules"), ("ops_adapters.json", "/api/adapters")):
         try:
             data = ops.call("GET", path)
