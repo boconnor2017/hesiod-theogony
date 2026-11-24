@@ -8,7 +8,9 @@
 #              runtime's IP pool and spare CPU/RAM in the management cluster.
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.9 (catalog bundles carry only id/type/name/binaries: component from the enclosing key or the
+# Version: 1.10 (--configure: ESX syslog to Log Management (KB workaround), alert email plugin + Critical rule;
+#              --report: PASS/FAIL/MANUAL/EXCEPTION rows, KB numbers cited; --discover: save the VCF Operations API spec)
+#         1.9 (catalog bundles carry only id/type/name/binaries: component from the enclosing key or the
 #              file names, so the 4-file bundle check works)
 #         1.8 (stop before the upload when productVersionCatalog.json is missing: the tool requires it)
 #         1.7 (VCF Download Tool gets absolute paths: it runs from its own bin/ folder)
@@ -43,6 +45,11 @@
 #   deploy(lab_spec, part)            -m16 LOG|RTM --deploy: validate, deploy, follow the task to the end
 #   status(lab_spec, part)            -m16 LOG|RTM --status: the last deployment task (resume watching with --wait)
 #   report(lab_spec, part)            -m16 LOG|RTM --report: US-019 evidence for the part
+#   configure(lab_spec, part)         -m16 LOG --configure: ESX hosts send syslog to Log Management (the KB workaround
+#                                     for centralized collection), email alert plugin + Critical notification rule,
+#                                     and the UI steps that have no API (vCenter/NSX/SDDC Manager log collection,
+#                                     30-day retention). -m16 RTM --configure: records the lab exceptions.
+#   discover(lab_spec)                -m16 LOG|RTM --discover: saves the VCF Operations API spec to conf/obs/
 #   upload(lab_spec, part)            -m16 LOG|RTM --upload: side-load binaries downloaded by hand from the Broadcom
 #                                     portal into the Fleet depot (Software Depot in disconnected mode, no token):
 #                                     drop the files in <depot_store>, the module lays out PROD/COMP/<id>/ and
@@ -455,7 +462,8 @@ def report(lab_spec, part):
            "title": f"US-019 evidence: {s['title']}", "checks": []}
 
     def add(check, ok, detail=""):
-        rep["checks"].append({"check": check, "result": "PASS" if ok else "FAIL", "detail": detail})
+        res = ok if isinstance(ok, str) else ("PASS" if ok else "FAIL")
+        rep["checks"].append({"check": check, "result": res, "detail": detail})
     fleet, sddc, comps, version = _connect(s)
     have = [c for c in comps if c["type"] == s["type"]]
     rep["component"] = have
@@ -469,7 +477,11 @@ def report(lab_spec, part):
             add(f"https://{s['fqdn']} answers", r.status_code < 500, f"HTTP {r.status_code}")
         except requests.RequestException as e:
             add(f"https://{s['fqdn']} answers", False, e.__class__.__name__)
-    rep["result"] = "PASS" if all(c["result"] == "PASS" for c in rep["checks"]) else "FAIL"
+        _log_checks(lab_spec, s, add)
+    _exception_checks(lab_spec, s, add)
+    res = [c["result"] for c in rep["checks"]]
+    rep["result"] = "FAIL" if "FAIL" in res else "PASS" + (
+        f" ({res.count('MANUAL')} manual, {res.count('EXCEPTION')} exception)" if {"MANUAL", "EXCEPTION"} & set(res) else "")
     os.makedirs(EVIDENCE_DIR, exist_ok=True)
     base = os.path.join(EVIDENCE_DIR, f"obs_{s['part'].lower()}_evidence_{datetime.datetime.now():%Y%m%d-%H%M%S}")
     with open(base + ".json", "w") as f:
@@ -480,7 +492,7 @@ def report(lab_spec, part):
     with open(base + ".md", "w") as f:
         f.write("\n".join(L) + "\n")
     for c in rep["checks"]:
-        liblog.print_logs(f"    {c['result']:4}  {c['check']}{': ' + str(c['detail']) if c['result'] != 'PASS' and c['detail'] else ''}")
+        liblog.print_logs(f"    {c['result']:9}  {c['check']}{': ' + str(c['detail']) if c['detail'] else ''}")
     liblog.print_logs(f"Evidence report: {rep['result']}  ->  {base}.md  (+ .json)")
     return rep
 
@@ -701,3 +713,300 @@ def upload(lab_spec, part):
         os.remove(pwf)
     liblog.print_logs(f"Set observability.{s['key']}.version to the {s['title']} version listed above, then -m16 "
                       f"{s['part']} --deploy.")
+
+
+# ---------------------------------------------------------------- configure (US-019 acceptance criteria)
+
+KB_ESX_SYSLOG = "KB 318939 (configuring syslog on ESXi)"
+KB_CENTRAL = "KB 433089 (Log Collection known issues); Broadcom defect on centralized collection to ESX/NSX (KB 459802, pending)"
+LOG_UI = ("VCF Operations > Administration > Integrations > VMware Cloud Foundation > <each VCF instance> > activate log "
+          "collection for vCenter, NSX and SDDC Manager")
+RETENTION_UI = "VCF Operations > Operate > Logs > Log Processing (partitions) > retention 30 days"
+
+
+class Ops:
+    """VCF Operations suite-api (token in the OpsToken header)."""
+
+    def __init__(self, fqdn, user, password, source="LOCAL"):
+        self.base, self.user, self.password, self.source = f"https://{fqdn}/suite-api", user, password, source
+        self.http, self.token, self.scheme = requests.Session(), None, "OpsToken"
+        self.http.verify = False
+
+    def login(self):
+        r = self.http.post(f"{self.base}/api/auth/token/acquire", timeout=30,
+                           json={"username": self.user, "password": self.password, "authSource": self.source},
+                           headers={"Accept": "application/json", "Content-Type": "application/json"})
+        if r.status_code != 200:
+            raise ObsError(f"VCF Operations login as {self.user} failed (HTTP {r.status_code}): {r.text[:200]}")
+        self.token = r.json()["token"]
+        return self
+
+    def call(self, method, path, body=None, ok404=False):
+        for attempt in range(3):
+            if not self.token:
+                self.login()
+            r = self.http.request(method, self.base + path, json=body, timeout=60,
+                                  headers={"Authorization": f"{self.scheme} {self.token}", "Accept": "application/json",
+                                           "Content-Type": "application/json"})
+            if r.status_code == 401 and attempt == 0:
+                self.scheme = "vRealizeOpsToken"     # older header name, still accepted by some builds
+                continue
+            if r.status_code == 404 and ok404:
+                return None
+            if r.status_code >= 400:
+                raise ObsError(f"{method} /suite-api{path}: HTTP {r.status_code}: {_errors(r)}")
+            return r.json() if r.text.strip() else {}
+        raise ObsError(f"{method} /suite-api{path}: not authorized")
+
+
+def _ops(lab_spec):
+    d = (lab_spec.get("observability") or {}).get("depot") or {}
+    plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
+    fqdn = d.get("ops_fqdn")
+    if _placeholder(fqdn):
+        fqdn = [v for k, v in plan["vcf_operations"]["fqdns"].items() if k.startswith("node")][0]["fqdn"]
+    auth = lab_spec["authentication"][int(d.get("use_these_credentials", lab_spec["vcf"]["use_these_credentials"]))]
+    return Ops(fqdn, d.get("ops_user") or "admin", auth["password"]).login()
+
+
+def _alert_settings(lab_spec):
+    a = (lab_spec.get("observability") or {}).get("alerts") or {}
+    if not a or _placeholder(a.get("use_these_credentials")):
+        raise ObsError('set observability.alerts (smtp_host, smtp_port, security, sender, recipients, use_these_credentials)')
+    auth = lab_spec["authentication"][int(a["use_these_credentials"])]
+    if _placeholder(auth.get("username")) or _placeholder(auth.get("password")):
+        raise ObsError(f"authentication[{a['use_these_credentials']}] ({auth.get('system')}) still has <sample> values")
+    rcpt = [r for r in a.get("recipients") or [] if not _placeholder(r)] or [auth["username"]]
+    return {"host": a.get("smtp_host", "smtp.gmail.com"), "port": int(a.get("smtp_port", 587)),
+            "security": str(a.get("security", "STARTTLS")).upper(), "user": auth["username"], "password": auth["password"],
+            "sender": a.get("sender") if not _placeholder(a.get("sender")) else auth["username"], "recipients": rcpt,
+            "name": a.get("plugin_name", "hesiod-email"), "rule": a.get("rule_name", "hesiod-critical-to-email")}
+
+
+def _plugins(ops):
+    return [d for d in _walk(ops.call("GET", "/api/alertplugins")) if d.get("pluginId") and d.get("name")]
+
+
+def _rules(ops):
+    try:
+        return [d for d in _walk(ops.call("GET", "/api/notifications/rules")) if d.get("id") and d.get("name")]
+    except ObsError:
+        return []
+
+
+def _email_plugin_body(ops, a, existing=None):
+    vals = {"IS_SECURE_CONNECTION": "true", "SECURE_CONNECTION_TYPE": "SSL" if a["security"] == "SSL" else "TLS",
+            "REQUIRES_AUTHENTICATION": "true", "SMTP_HOST": a["host"], "SMTP_PORT": str(a["port"]),
+            "SENDER_EMAIL": a["sender"], "SENDER_NAME": "Hesiod VCF Operations", "USERNAME": a["user"],
+            "PASSWORD": a["password"], "CONNECTION_TIMEOUT": "30"}
+    try:      # keep only the fields this build's email plugin type declares, when it says
+        t = next((d for d in _walk(ops.call("GET", "/api/alertplugins/types")) if d.get("pluginTypeId") == "StandardEmailPlugin"), None)
+        names = {x.get("name") for x in _walk(t or {}) if isinstance(x.get("name"), str) and x.get("name").isupper()}
+        if names:
+            vals = {k: v for k, v in vals.items() if k in names}
+    except ObsError:
+        pass
+    body = {"pluginTypeId": "StandardEmailPlugin", "name": a["name"],
+            "configValues": [{"name": k, "value": v} for k, v in vals.items()]}
+    if existing:
+        body["pluginId"] = existing["pluginId"]
+    return body
+
+
+def _smtp_reachable(a):
+    import socket
+    try:
+        socket.create_connection((a["host"], a["port"]), timeout=10).close()
+        return None
+    except OSError as e:
+        return f"{a['host']}:{a['port']} not reachable from hesthe001 ({e.__class__.__name__}): check DNS and the router NAT"
+
+
+def _vcenters(lab_spec):
+    """[(label, connect cfg)] for the management vCenter and every recorded workload domain vCenter."""
+    plan = {e["component"]: e for e in libvcf.get_vcf_plan(lab_spec)}
+    pw = lab_spec["authentication"][lab_spec["vcf"]["use_these_credentials"]]["password"]
+    out = [("management", {"addresses": {"vcenter": {"fqdn": plan["vcenter"]["fqdns"]["vcenter"]["fqdn"]}},
+                           "sso_user": "administrator@vsphere.local", "password": pw})]
+    for wd in lab_spec.get("workload_domains") or []:
+        try:
+            w = libwld.wld_settings(lab_spec, wd.get("name"))
+        except Exception:
+            continue
+        if w.get("recorded"):
+            out.append((w["name"], w))
+    return out
+
+
+def _syslog_target(lab_spec, s):
+    f = (lab_spec.get("observability") or {}).get("log_forwarding") or {}
+    proto = str(f.get("protocol", "ssl")).lower()
+    port = int(f.get("port", 1514 if proto == "ssl" else 514))
+    return f"{proto}://{s['fqdn']}:{port}", proto == "ssl"
+
+
+def _esx_syslog(lab_spec, s, apply):
+    """Per host: (vcenter label, host, ok, detail). apply=True sets the target (appended, never replacing others)."""
+    from pyVmomi import vim
+    from pyVim.connect import Disconnect
+    target, ssl_on = _syslog_target(lab_spec, s)
+    rows = []
+    for label, cfg in _vcenters(lab_spec):
+        try:
+            si = libwld._vc_connect(cfg)
+        except Exception as e:
+            rows.append((label, cfg["addresses"]["vcenter"]["fqdn"], False, f"vCenter login failed: {str(e)[:120]}"))
+            continue
+        try:
+            view = si.content.viewManager.CreateContainerView(si.content.rootFolder, [vim.HostSystem], True)
+            hosts = list(view.view)
+            view.Destroy()
+            for h in hosts:
+                try:
+                    if h.runtime.connectionState != "connected":
+                        rows.append((label, h.name, False, f"host {h.runtime.connectionState}"))
+                        continue
+                    adv = h.configManager.advancedOption
+                    cur = str(adv.QueryOptions("Syslog.global.logHost")[0].value or "")
+                    hosts_now = [x.strip() for x in cur.split(",") if x.strip()]
+                    if apply and target not in hosts_now:
+                        new = ",".join(hosts_now + [target])
+                        changes = [vim.option.OptionValue(key="Syslog.global.logHost", value=new)]
+                        if ssl_on:
+                            changes.append(vim.option.OptionValue(key="Syslog.global.logCheckSSLCerts", value=True))
+                        adv.UpdateOptions(changedValue=changes)
+                        try:
+                            h.configManager.firewallSystem.EnableRuleset(id="syslog")
+                        except Exception:
+                            pass
+                        hosts_now.append(target)
+                    rows.append((label, h.name, target in hosts_now, ",".join(hosts_now) or "(none)"))
+                except Exception as e:
+                    rows.append((label, h.name, False, str(getattr(e, "msg", e))[:160]))
+        finally:
+            Disconnect(si)
+    return rows
+
+
+def configure(lab_spec, part):
+    s = settings(lab_spec, part)
+    if s["part"] == "RTM":
+        _print_exceptions(lab_spec)
+        liblog.print_logs("Real-Time Metrics: nothing to configure beyond the deployment (Essentials 20-second collection is"
+                          " always on). -m16 RTM --report records the exceptions above.")
+        return
+    target, _ = _syslog_target(lab_spec, s)
+    liblog.print_logs(f"(Configure 1) ESX hosts send syslog to {target}: the {KB_ESX_SYSLOG} method, used because "
+                      f"centralized collection does not reliably reach ESX ({KB_CENTRAL}).")
+    for label, host, ok, detail in _esx_syslog(lab_spec, s, apply=True):
+        liblog.print_logs(f"    {'ok  ' if ok else 'FAIL'}  [{label}] {host}: {detail}")
+
+    liblog.print_logs("(Configure 2) Email alerts: plugin + notification rule for Critical alerts.")
+    a = _alert_settings(lab_spec)
+    p = _smtp_reachable(a)
+    liblog.print_logs(f"    {'FAIL' if p else 'ok  '}  SMTP {a['host']}:{a['port']} reachable{': ' + p if p else ''}")
+    ops = _ops(lab_spec)
+    cur = next((x for x in _plugins(ops) if x["name"] == a["name"]), None)
+    body = _email_plugin_body(ops, a, cur)
+    if cur:
+        ops.call("PUT", "/api/alertplugins", body)
+        pid = cur["pluginId"]
+        liblog.print_logs(f"    plugin {a['name']} updated")
+    else:
+        pid = (ops.call("POST", "/api/alertplugins", body) or {}).get("pluginId")
+        if not pid:
+            pid = next((x["pluginId"] for x in _plugins(ops) if x["name"] == a["name"]), None)
+        liblog.print_logs(f"    plugin {a['name']} created")
+    ops.call("PUT", f"/api/alertplugins/{pid}/enable/true")
+    liblog.print_logs("    plugin enabled")
+    rule = {"name": a["rule"], "pluginId": pid, "criticalities": ["CRITICAL"], "alertControlStates": ["OPEN"],
+            "properties": [{"name": "emailaddr", "value": ",".join(a["recipients"])}]}
+    old = next((r for r in _rules(ops) if r["name"] == a["rule"]), None)
+    if old:
+        ops.call("PUT", "/api/notifications/rules", {**rule, "id": old["id"]})
+        liblog.print_logs(f"    rule {a['rule']} updated (Critical -> {', '.join(a['recipients'])})")
+    else:
+        ops.call("POST", "/api/notifications/rules", rule)
+        liblog.print_logs(f"    rule {a['rule']} created (Critical -> {', '.join(a['recipients'])})")
+    try:
+        ops.call("POST", "/api/alertplugins/test", {**body, "pluginId": pid})
+        liblog.print_logs("    test email sent: check the inbox")
+    except ObsError as e:
+        liblog.print_logs(f"    test email not sent ({str(e)[:160]}): use Test on the plugin in the UI")
+
+    liblog.print_logs("(Configure 3) Steps without an API in this build (-m16 LOG --report lists them as MANUAL):")
+    liblog.print_logs(f"    vCenter / NSX / SDDC Manager log collection: {LOG_UI}")
+    liblog.print_logs(f"    30-day retention: {RETENTION_UI}")
+    _print_exceptions(lab_spec)
+    liblog.print_logs("Done. -m16 LOG --report writes the US-019 evidence.")
+
+
+def _exceptions(lab_spec):
+    return [e for e in (lab_spec.get("observability") or {}).get("exceptions") or [] if not _placeholder(e.get("criterion"))]
+
+
+def _print_exceptions(lab_spec):
+    for e in _exceptions(lab_spec):
+        liblog.print_logs(f"    EXCEPTION ({e.get('part', 'ALL')}): {e['criterion']}: {e.get('reason', '')}")
+
+
+def _exception_checks(lab_spec, s, add):
+    for e in _exceptions(lab_spec):
+        if str(e.get("part", s["part"])).upper() in (s["part"], "ALL"):
+            add(e["criterion"], "EXCEPTION", e.get("reason", ""))
+
+
+def _log_checks(lab_spec, s, add):
+    excepted = {e["criterion"].lower() for e in _exceptions(lab_spec)}
+    target, _ = _syslog_target(lab_spec, s)
+    rows = _esx_syslog(lab_spec, s, apply=False)
+    bad = [f"[{l}] {h}: {d}" for l, h, ok, d in rows if not ok]
+    add(f"ESX hosts ({len(rows)}) forward syslog to {target}", not bad and bool(rows),
+        ("; ".join(bad)[:400] + " / " if bad else "") + f"workaround per {KB_ESX_SYSLOG}; {KB_CENTRAL}")
+    add("vCenter, NSX and SDDC Manager log collection activated", "MANUAL",
+        f"{LOG_UI}; verify in Operate > Logs > Analyze Logs (count of events by source). See {KB_CENTRAL}")
+    if not any("retention" in x for x in excepted):
+        add("Log retention 30 days", "MANUAL", f"{RETENTION_UI}; met/not met is shown on the Log Processing page (KB 415610)")
+    try:
+        a = _alert_settings(lab_spec)
+        ops = _ops(lab_spec)
+        pl = next((x for x in _plugins(ops) if x["name"] == a["name"]), None)
+        add(f"Email alert plugin {a['name']} enabled", bool(pl) and str(pl.get("enabled", True)).lower() != "false",
+            f"{a['host']}:{a['port']} {a['security']} as {a['sender']}" if pl else "not found")
+        r = next((x for x in _rules(ops) if x["name"] == a["rule"]), None)
+        add("Critical alerts routed to email", bool(r), f"rule {a['rule']} -> {', '.join(a['recipients'])}" if r else "rule not found")
+    except ObsError as e:
+        add("Email alerts", False, str(e)[:200])
+
+
+def discover(lab_spec):
+    """Save VCF Operations' API description (and the email plugin type) for building against this exact build."""
+    ops = _ops(lab_spec)
+    os.makedirs(OBS_DIR, exist_ok=True)
+    saved = []
+    for path in ("/doc/swagger.json", "/doc/openapi.json", "/v3/api-docs", "/api-docs", "/doc/swagger2.json"):
+        try:
+            r = ops.http.get(ops.base + path, timeout=60, headers={"Authorization": f"{ops.scheme} {ops.token}"})
+        except requests.RequestException:
+            continue
+        if r.status_code == 200 and r.text.lstrip().startswith("{"):
+            f = os.path.join(OBS_DIR, "ops_api_spec.json")
+            open(f, "w").write(r.text)
+            saved.append(f"{f} (from /suite-api{path})")
+            break
+    for name, path in (("ops_alertplugin_types.json", "/api/alertplugins/types"), ("ops_alertplugins.json", "/api/alertplugins"),
+                       ("ops_notification_rules.json", "/api/notifications/rules"), ("ops_adapters.json", "/api/adapters")):
+        try:
+            data = ops.call("GET", path)
+        except ObsError as e:
+            liblog.print_logs(f"    {path}: {str(e)[:120]}")
+            continue
+        txt = json.dumps(data, indent=1)
+        for k in ("PASSWORD", "password"):            # never write secrets to disk
+            txt = "\n".join(l for l in txt.splitlines() if k not in l)
+        open(os.path.join(OBS_DIR, name), "w").write(txt)
+        saved.append(os.path.join(OBS_DIR, name))
+    for f in saved:
+        liblog.print_logs(f"    saved {f}")
+    if not saved:
+        raise ObsError("nothing saved: VCF Operations answered none of the API description paths")

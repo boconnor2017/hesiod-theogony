@@ -48,6 +48,10 @@
         "system" : "vcf_fleet_lcm",
         "username" : "admin@vsp.local",
         "password" : "<sample: VMware123!VMware123! (the services runtime password: usually the vcf_components password)>"
+    },{
+        "system" : "smtp_alerts",
+        "username" : "<sample: you@gmail.com>",
+        "password" : "<sample: 16-character Google app password>"
     }],
 
     "domain" : {
@@ -351,6 +355,20 @@
         "use_these_credentials" : 10,
         "log_management" : { "fqdn" : "auto", "size" : "small", "nodes" : 1, "version" : "auto" },
         "real_time_metrics" : { "version" : "auto" },
+        "log_forwarding" : { "protocol" : "ssl", "port" : 1514 },
+        "alerts" : {
+            "smtp_host" : "smtp.gmail.com",
+            "smtp_port" : 587,
+            "security" : "STARTTLS",
+            "sender" : "<sample: you@gmail.com>",
+            "recipients" : ["<sample: you@gmail.com>"],
+            "use_these_credentials" : 11
+        },
+        "exceptions" : [
+            { "part" : "RTM", "criterion" : "ESX real-time collection at 2 seconds (ESX Top)",
+              "reason" : "<sample: requires scaling RTM to Large; lab runs Essentials 20-second collection>" },
+            { "part" : "LOG", "criterion" : "<optional: Log retention 30 days>", "reason" : "<sample: Small deployment sizing>" }
+        ],
         "depot" : {
             "depot_store" : "/usr/local/hesiod-depot",
             "vcfdt_path" : "/usr/local/vcfdt",

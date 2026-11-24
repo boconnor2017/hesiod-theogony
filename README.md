@@ -458,6 +458,7 @@ sudo python3 hesiod-theogony.py -m15 EDGE --report
 ## Module 16: Deploy Log Management and Realtime Metrics
 | Prerequisite | Comments                                     |
 |--------------|----------------------------------------------|
+| Getting Started | All necessary downloads (including download tool) need to be available |
 | Module 1     | `/conf/lab_spec.json` needs to be populated. |
 | Module 2     | HKS needs to be running.                     |
 | Module 3     | Technitium needs to be running and availble. |
@@ -493,4 +494,9 @@ sudo python3 hesiod-theogony.py -m16 RTM --deploy
 Validates Realtime Metrics.
 ```
 sudo python3 hesiod-theogony.py -m16 RTM --report
+```
+
+Configures 2-second ESX collection, 30-day retention, log forwarding, and email alerts
+```
+sudo python3 hesiod-theogony.py -m16 --configure
 ```
