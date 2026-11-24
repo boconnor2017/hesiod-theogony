@@ -348,6 +348,26 @@
                 "test_url" : "https://dl.broadcom.com",
                 "OVA_path" : "<optional: defaults to the first ubuntu_servers[].OVA_path>"
             }
+        },
+        "supervisor" : {
+            "name" : "<sample: sv-w01>",
+            "zone" : "<sample: zone-w01>",
+            "control_plane_size" : "SMALL",
+            "control_plane_count" : 1,
+            "management_portgroup" : "<optional: defaults to <vds>-pg-management>",
+            "storage_policy" : "<optional: defaults to the domain's storage_policy.name>",
+            "api_dns_name" : "<optional: defaults to the Supervisor name, in domain.name>",
+            "service_cidr" : "10.96.0.0/23",
+            "default_private_cidrs" : ["<sample: 172.26.0.0/16>"],
+            "nsx_project" : "/orgs/default/projects/default",
+            "vpc_connectivity_profile" : "/orgs/default/projects/default/vpc-connectivity-profiles/default",
+            "content_library" : "<optional: Supervisor images library, created beforehand>",
+            "namespace" : { "name" : "hw-k8s", "private_cidrs" : [], "test_image" : "nginx:stable" },
+            "test_user" : { "use_ldap_user" : 0, "admin_group" : 0, "login_domain" : "<sample: hesiod.local>" },
+            "exceptions" : [
+                { "part" : "SPV", "criterion" : "Supervisor control plane Small x3 (design Table 9)",
+                  "reason" : "<sample: Small x1 in the lab: nested wld01 capacity>" }
+            ]
         }
     }],
     "observability" : {

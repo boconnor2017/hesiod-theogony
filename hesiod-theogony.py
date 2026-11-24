@@ -27,6 +27,7 @@ from python_lib import scg as libscg
 from python_lib import wld as libwld
 from python_lib import nsxnet as libnsxnet
 from python_lib import obs as libobs
+from python_lib import spv as libspv
 
 # Local Functions
 def _main_(args):
@@ -99,6 +100,14 @@ def _main_(args):
 
     if '-m16' in args:
         m16(args)
+        std.sys.exit()
+
+    if '-m17' in args:
+        m17(args)
+        std.sys.exit()
+
+    if '-m18' in args:
+        m18(args)
         std.sys.exit()
 
     if '-m14' in args:
@@ -188,6 +197,17 @@ def help_menu():
     print("         --upload             side-load portal downloads from depot_store into the Fleet depot (no token)")
     print("         --configure          LOG: ESX syslog, email alerts (+ UI steps); RTM: record exceptions")
     print("         --discover           save the VCF Operations API description to conf/obs/")
+    print("    -m17: (Module 17) placeholder: VCF Operations for Networks (US-020), deferred for capacity.")
+    print("    -m18 SPV|VPC: (Module 18) Supervisor with VPC networking on a workload domain (US-021).")
+    print("                              Default: plan + preflight (compatibility, portgroup, policy, NSX project/profile)")
+    print("         SPV --deploy         enable the Supervisor, wait for RUNNING/READY, add the API DNS record")
+    print("         SPV --status [--wait]   Supervisor state and WCP messages; --wait follows it and adds DNS")
+    print("         SPV --dns            re-add the API DNS record (after a Module 4 refresh)")
+    print("         SPV --certs          lab CA certificate on the Supervisor API (CSR from WCP, step-ca)")
+    print("         VPC --deploy         namespace with its own VPC + test workload (deployment + LoadBalancer)")
+    print("         VPC --cleanup        remove the test workload")
+    print("         --report             US-021 evidence (SPV: Running, DNS, trusted cert, kubectl get ns; VPC: pod, VIP)")
+    print("         --domain NAME        workload domain (default: the first in lab_spec)")
     print("         --deploy             validate, deploy (adds services runtime workers, 30-60 min) and follow the task")
     print("         --status [--wait]    the last deployment task; --wait keeps following it to the end")
     print("         --report             US-019 evidence;  --force deploys even when validation fails")
@@ -684,7 +704,7 @@ def m16(args):
         elif "--status" in args:
             libobs.status(lab_spec_py, part, wait="--wait" in args)
         elif "--report" in args:
-            if libobs.report(lab_spec_py, part)["result"] != "PASS":
+            if not libobs.report(lab_spec_py, part)["result"].startswith("PASS"):
                 std.sys.exit(1)
         elif libobs.plan(lab_spec_py, part):
             std.sys.exit(1)
@@ -694,6 +714,52 @@ def m16(args):
     finally:
         print("=========================================================")
         print("Module 16 runtime is completed.")
+        print("=========================================================")
+        print("")
+
+def m17(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 17")
+    print("=========================================================")
+    liblog.print_logs("Module 17 is a placeholder for US-020 (VCF Operations for Networks collecting from both vCenters and")
+    liblog.print_logs("the workload NSX, IPFIX, the UC-013 trace). Deferred: management capacity. Nothing to run yet.")
+    print("=========================================================")
+    print("Module 17 runtime is completed.")
+    print("=========================================================")
+    print("")
+
+def m18(args):
+    print("=========================================================")
+    print("Launching Theogony: MODULE 18")
+    print("=========================================================")
+    part = next((a.upper() for a in args if a.upper() in ("SPV", "VPC")), None)
+    if not part:
+        liblog.print_logs("Usage: -m18 SPV|VPC [--deploy|--status|--dns|--certs|--cleanup|--report] [--domain NAME] (see --help)")
+        std.sys.exit(1)
+    domain = args[args.index("--domain") + 1] if "--domain" in args and args.index("--domain") + 1 < len(args) else None
+    lab_spec_py = import_lab_configuration_parameters()
+    try:
+        if "--deploy" in args:
+            libspv.deploy(lab_spec_py, part, domain)
+        elif "--status" in args:
+            libspv.status(lab_spec_py, part, domain, wait="--wait" in args)
+        elif "--dns" in args:
+            libspv.dns(lab_spec_py, domain)
+        elif "--certs" in args:
+            libspv.certs(lab_spec_py, domain)
+        elif "--cleanup" in args and part == "VPC":
+            libspv.vpc_cleanup(lab_spec_py, domain)
+        elif "--report" in args:
+            if not libspv.report(lab_spec_py, part, domain)["result"].startswith("PASS"):
+                std.sys.exit(1)
+        elif libspv.plan(lab_spec_py, part, domain):
+            std.sys.exit(1)
+    except (libspv.SpvError, libnsxnet.NetError, libwld.WldError, libvcf.VcfError, libesxi.EsxiBuildError) as e:
+        liblog.print_logs("Module 18 stopped: "+str(e))
+        std.sys.exit(1)
+    finally:
+        print("=========================================================")
+        print("Module 18 runtime is completed.")
         print("=========================================================")
         print("")
 
