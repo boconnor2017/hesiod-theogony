@@ -7,7 +7,8 @@
 #                VPC  Namespace    (its own NSX VPC, auto-created by the Supervisor)
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.3 (--certs adds the API name + VIP as SANs when the CSR has none (UI CSRs); --report samples the
+# Version: 1.4 (--certs adds the API name whenever the CSR's SANs lack it (UI CSRs carry only the VIP)
+#         1.3 (--certs adds the API name + VIP as SANs when the CSR has none (UI CSRs); --report samples the
 #              status for ~3 min when a service warning makes it flap)
 #         1.2 (--certs: CSR via the 9.1 certificate-management API or a CSR saved from the UI; install with the
 #              clusters update call (tls_endpoint_certificate), KB 450791)
@@ -467,16 +468,18 @@ def certs(lab_spec, name=None):
     from cryptography import x509 as _x509
     req = _x509.load_pem_x509_csr(csr.encode())
     try:
-        has_san = bool(req.extensions.get_extension_for_class(_x509.SubjectAlternativeName).value)
+        san = req.extensions.get_extension_for_class(_x509.SubjectAlternativeName).value
+        have = [str(v) for v in san.get_values_for_type(_x509.DNSName)] + \
+               [str(v) for v in san.get_values_for_type(_x509.IPAddress)]
     except _x509.ExtensionNotFound:
-        has_san = False
+        have = []
     vip = (json.load(open(os.path.join(SPV_DIR, f"{s['name']}_api.json"))) if os.path.exists(
         os.path.join(SPV_DIR, f"{s['name']}_api.json")) else {}).get("vip")
-    if has_san:
+    if s["api_fqdn"] in have:
         leaf, inter, root = libca.sign_csr(lab_spec, csr)
-    else:   # a UI CSR has only a CN; kubectl (Go) needs SANs: add the API name and VIP
-        sans = [s["api_fqdn"]] + ([vip] if vip else [])
-        liblog.print_logs(f"    the CSR has no SANs: signing with SANs {', '.join(sans)}")
+    else:   # UI CSRs carry the VIP at most; kubectl (Go) matches the name only against SANs
+        sans = [s["api_fqdn"]] + [x for x in have if x != s["api_fqdn"]] + ([vip] if vip and vip not in have else [])
+        liblog.print_logs(f"    the CSR's SANs ({', '.join(have) or 'none'}) lack {s['api_fqdn']}: signing with SANs {', '.join(sans)}")
         leaf, inter, root = libca.sign_csr_with_sans(lab_spec, csr, sans)
     chain = leaf.strip() + "\n" + inter.strip() + "\n"
     os.makedirs(SPV_DIR, exist_ok=True)
