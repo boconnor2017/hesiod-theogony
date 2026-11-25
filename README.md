@@ -500,3 +500,27 @@ Configures 2-second ESX collection, 30-day retention, log forwarding, and email 
 ```
 sudo python3 hesiod-theogony.py -m16 --configure
 ```
+
+## Module 17: Deploy VCF Operations for Networks
+`Coming Soon.`
+
+## Module 18: Deploy and Configure VKS Supervisor and VPC
+| Prerequisite | Comments                                     |
+|--------------|----------------------------------------------|
+| Module 1     | `/conf/lab_spec.json` needs to be populated. |
+| Module 2     | HKS needs to be running.                     |
+| Module 3     | Technitium needs to be running and availble. |
+| Module 8     | VCF Fleet is deployed.                       |
+| Module 14    | VCF VI workload domain is deployed.          |
+
+This script uses the configuration from `lab_spec.json` in Module 1 to deploy a VKS Supervisor and a VPC to the workload domain from Module 14. The `SPV` parameter deploys the Supervisor and creates the NSX foundation for the VPC. The `VPC` parameter creates the namespace on the VPC and a "Hello World" workload (deployment with a load balancer).
+
+Runs a plan for the VKS Supervisor.
+```
+sudo python3 hesiod-theogony.py -m18 SPV
+```
+
+Depoloys the VKS Supervisor.
+```
+sudo python3 hesiod-theogony.py -m18 SPV --deploy
+```
