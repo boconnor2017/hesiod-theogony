@@ -4,7 +4,8 @@
 #              Deployment of step-ca itself lives in python_lib/k8_management.py (deploy_step_ca).
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.4 (domain= on inventory/rotate: workload domains, used by -m14 --certs)
+# Version: 1.5 (sign_csr_with_sans: SANs for CN-only CSRs, signed with the intermediate key; used by -m18 --certs)
+#         1.4 (domain= on inventory/rotate: workload domains, used by -m14 --certs)
 #         1.3 (served-chain check: endpoints that send only their own certificate, e.g. ESXi)
 #
 # Chain: <name> Root CA (RSA, 10y) -> <name> Intermediate CA (RSA, 5y) -> leaf (RSA 2048 from the VCF CSR, SHA-256)
@@ -194,6 +195,41 @@ def sign_csr(lab_spec, csr_pem):
     pems = _pems(out)
     if rc != 0 or not pems:
         raise CaError(f"step ca sign failed: {out.strip()[-400:]}")
+    root, inter = _ca_chain()
+    pem = lambda c: c.public_bytes(serialization.Encoding.PEM).decode().strip()
+    return pems[0], pem(inter), pem(root)
+
+
+def sign_csr_with_sans(lab_spec, csr_pem, sans):
+    """Sign a CSR that carries no SANs (e.g. one generated in a vCenter UI) with the intermediate key directly, adding
+    the given DNS names / IPs as SANs: Go clients (kubectl, kubectl-vsphere) ignore the CN. Returns like sign_csr."""
+    import ipaddress as _ip
+    cfg = ca_settings(lab_spec)
+    req = x509.load_pem_x509_csr(csr_pem.encode())
+    entries = []
+    for v in sans:
+        try:
+            _ip.ip_address(v)
+            entries.append({"type": "ip", "value": v})
+        except ValueError:
+            entries.append({"type": "dns", "value": v})
+    tpl = ('{"subject": {{ toJson .Subject }}, "sans": ' + json.dumps(entries) +
+           ', "keyUsage": ["digitalSignature", "keyEncipherment"], "extKeyUsage": ["serverAuth", "clientAuth"]}')
+    b64c = base64.b64encode(csr_pem.encode()).decode()
+    b64t = base64.b64encode(tpl.encode()).decode()
+    script = (
+        "T=$(mktemp -d)\n"
+        f"echo '{b64c}' | base64 -d > $T/r.csr\n"
+        f"echo '{b64t}' | base64 -d > $T/leaf.tpl\n"
+        "if step certificate sign $T/r.csr /home/step/certs/intermediate_ca.crt /home/step/secrets/intermediate_ca_key "
+        "--template $T/leaf.tpl --password-file /run/step/ca-password "
+        f"--not-after {cfg['leaf_validity_days'] * 24}h > $T/r.crt 2> $T/log; then cat $T/r.crt; rc=0; "
+        "else cat $T/log; rc=1; fi\n"
+        "rm -rf $T\n(exit $rc)")
+    rc, out = _exec(lab_spec, script)
+    pems = _pems(out)
+    if rc != 0 or not pems:
+        raise CaError(f"step certificate sign failed: {out.strip()[-400:]}")
     root, inter = _ca_chain()
     pem = lambda c: c.public_bytes(serialization.Encoding.PEM).decode().strip()
     return pems[0], pem(inter), pem(root)

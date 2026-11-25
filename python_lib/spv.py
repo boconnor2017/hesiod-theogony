@@ -7,7 +7,9 @@
 #                VPC  Namespace    (its own NSX VPC, auto-created by the Supervisor)
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.2 (--certs: CSR via the 9.1 certificate-management API or a CSR saved from the UI; install with the
+# Version: 1.3 (--certs adds the API name + VIP as SANs when the CSR has none (UI CSRs); --report samples the
+#              status for ~3 min when a service warning makes it flap)
+#         1.2 (--certs: CSR via the 9.1 certificate-management API or a CSR saved from the UI; install with the
 #              clusters update call (tls_endpoint_certificate), KB 450791)
 #         1.1 (RUNNING / WARNING counts as up: a Supervisor Service warning (e.g. cci-ns) no longer blocks the
 #              DNS step; --report shows the warning in the Running row)
@@ -462,7 +464,20 @@ def certs(lab_spec, name=None):
                        f"Workload Management > Supervisors > {s['name']} > Configure > Certificates > Workload "
                        f"platform management > Generate CSR (common name {s['api_fqdn']}), save the PEM text as "
                        f"{csr_file} and rerun --certs. (Tried: {' | '.join(tried[-3:])})")
-    leaf, inter, root = libca.sign_csr(lab_spec, csr)
+    from cryptography import x509 as _x509
+    req = _x509.load_pem_x509_csr(csr.encode())
+    try:
+        has_san = bool(req.extensions.get_extension_for_class(_x509.SubjectAlternativeName).value)
+    except _x509.ExtensionNotFound:
+        has_san = False
+    vip = (json.load(open(os.path.join(SPV_DIR, f"{s['name']}_api.json"))) if os.path.exists(
+        os.path.join(SPV_DIR, f"{s['name']}_api.json")) else {}).get("vip")
+    if has_san:
+        leaf, inter, root = libca.sign_csr(lab_spec, csr)
+    else:   # a UI CSR has only a CN; kubectl (Go) needs SANs: add the API name and VIP
+        sans = [s["api_fqdn"]] + ([vip] if vip else [])
+        liblog.print_logs(f"    the CSR has no SANs: signing with SANs {', '.join(sans)}")
+        leaf, inter, root = libca.sign_csr_with_sans(lab_spec, csr, sans)
     chain = leaf.strip() + "\n" + inter.strip() + "\n"
     os.makedirs(SPV_DIR, exist_ok=True)
     open(os.path.join(SPV_DIR, f"{s['name']}_api_chain.pem"), "w").write(chain)
@@ -617,8 +632,12 @@ def report(lab_spec, part, name=None):
                               "detail": detail})
     vc = _vc(s)
     cid = _cluster_id(vc, s)
-    sid, info = _summary(vc, s)
-    st = ((info or {}).get("config_status"), (info or {}).get("kubernetes_status"))
+    for i in range(6):          # a failing Supervisor Service makes it flap RUNNING <-> CONFIGURING: sample ~3 min
+        sid, info = _summary(vc, s)
+        st = ((info or {}).get("config_status"), (info or {}).get("kubernetes_status"))
+        if st[0] == "RUNNING":
+            break
+        time.sleep(30)
     warn = ""
     if st[1] == "WARNING":
         msgs = [(m.get("details") or {}).get("default_message") or m.get("default_message") or ""
