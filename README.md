@@ -58,6 +58,8 @@ Using the **Hesiod Main Appliance**, select from the list of modules below and p
 | Module 14 | Deploy a VI Workload Domain |
 | Module 15 | Deploy an Edge and a Hello World VPC with BGP |
 | Module 16 | Deploy Log Management and Realtime Metrics |
+| Module 17 | Deploy VCF Operations for Networks |
+| Module 18 | Deploy VKS |
 
 
 

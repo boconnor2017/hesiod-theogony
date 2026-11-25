@@ -7,7 +7,9 @@
 #                VPC  Namespace    (its own NSX VPC, auto-created by the Supervisor)
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.0
+# Version: 1.1 (RUNNING / WARNING counts as up: a Supervisor Service warning (e.g. cci-ns) no longer blocks the
+#              DNS step; --report shows the warning in the Running row)
+#         1.0
 #
 # vCenter REST (9.1):
 #   GET  /api/vcenter/namespace-management/cluster-compatibility?network_provider=NSX_VPC
@@ -368,6 +370,9 @@ def _wait(vc, s, cid, timeout_s=ENABLE_TIMEOUT):
                 liblog.print_logs(f"        {m.get('severity', '')}: {txt[:300]}")
         if st == ("RUNNING", "READY"):
             return
+        if st == ("RUNNING", "WARNING"):
+            liblog.print_logs("    RUNNING with a Supervisor Service warning (see the messages above): continuing.")
+            return
         if time.time() > deadline:
             raise SpvError(f"{s['name']} still {st} after {timeout_s // 60} min (-m18 SPV --status keeps watching)")
         time.sleep(60)
@@ -589,7 +594,12 @@ def report(lab_spec, part, name=None):
     cid = _cluster_id(vc, s)
     sid, info = _summary(vc, s)
     st = ((info or {}).get("config_status"), (info or {}).get("kubernetes_status"))
-    add(f"Supervisor {s['name']} Running", st == ("RUNNING", "READY"), f"{st[0]} / {st[1]}")
+    warn = ""
+    if st[1] == "WARNING":
+        msgs = [(m.get("details") or {}).get("default_message") or m.get("default_message") or ""
+                for m in _cluster_info(vc, cid).get("messages") or [] if m.get("severity") in ("WARNING", "ERROR")]
+        warn = "; Supervisor Service warning: " + " / ".join(x[:160] for x in msgs if x)[:400]
+    add(f"Supervisor {s['name']} Running", st[0] == "RUNNING" and st[1] in ("READY", "WARNING"), f"{st[0]} / {st[1]}{warn}")
     vip = _api_vip(_cluster_info(vc, cid))
     try:
         got = socket.gethostbyname(s["api_fqdn"])
