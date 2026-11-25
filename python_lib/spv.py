@@ -7,7 +7,9 @@
 #                VPC  Namespace    (its own NSX VPC, auto-created by the Supervisor)
 # Author: Brendan O'Connor
 # Date: November 2026
-# Version: 1.1 (RUNNING / WARNING counts as up: a Supervisor Service warning (e.g. cci-ns) no longer blocks the
+# Version: 1.2 (--certs: CSR via the 9.1 certificate-management API or a CSR saved from the UI; install with the
+#              clusters update call (tls_endpoint_certificate), KB 450791)
+#         1.1 (RUNNING / WARNING counts as up: a Supervisor Service warning (e.g. cci-ns) no longer blocks the
 #              DNS step; --report shows the warning in the Running row)
 #         1.0
 #
@@ -422,34 +424,57 @@ def dns(lab_spec, name=None):
 
 
 def certs(lab_spec, name=None):
-    """Lab CA certificate on the Supervisor API: CSR from WCP, signed by step-ca (Module 10), installed back."""
+    """Lab CA certificate on the Supervisor API: CSR from WCP (API, or saved from the UI to conf/spv/<name>.csr),
+    signed by step-ca (Module 10), installed with the clusters update call (KB 450791 documents the DCLI form)."""
     from python_lib import ca as libca
     s = settings(lab_spec, "SPV", name)
     vc = _vc(s)
     cid = _cluster_id(vc, s)
     ca = libca.ca_settings(lab_spec)
-    liblog.print_logs(f"(Certs 1) CSR for {s['api_fqdn']} from WCP.")
-    spec = {"common_name": s["api_fqdn"], "organization_name": ca.get("organization", "Hesiod"),
-            "organization_unit_name": "MPC", "locality": "Lab", "state_or_province": "Lab", "country": "US",
-            "email_address": f"admin@{s['domain']}", "key_size": 2048}
-    csr, last = None, None
-    for body in ({"spec": spec}, spec):        # the body is wrapped in "spec" on some builds
-        try:
-            r = vc.call("POST", f"/vcenter/namespace-management/clusters/{cid}/csr/tls-endpoint", body)
-            csr = r if isinstance(r, str) else (r or {}).get("csr") or (r or {}).get("value")
+    csr_file = os.path.join(SPV_DIR, f"{s['name']}.csr")
+    csr, tried = None, []
+    if os.path.exists(csr_file):
+        csr = open(csr_file).read()
+        liblog.print_logs(f"(Certs 1) CSR from {csr_file} (saved from the UI).")
+    else:
+        liblog.print_logs(f"(Certs 1) CSR for {s['api_fqdn']} from WCP.")
+        spec = {"common_name": s["api_fqdn"], "organization_name": ca.get("organization", "Hesiod"),
+                "organization_unit_name": "MPC", "locality": "Lab", "state_or_province": "Lab", "country": "US",
+                "email_address": f"admin@{s['domain']}", "key_size": 2048}
+        for path, params in ((f"/vcenter/namespace-management/certificate-management/tls-csr", {"cluster": cid}),
+                             (f"/vcenter/namespace-management/clusters/{cid}/certificate-management/tls-csr", None),
+                             (f"/vcenter/namespace-management/clusters/{cid}/csr/tls-endpoint", None)):
+            for body in ({"spec": spec}, {"cluster": cid, "spec": spec}, spec):
+                try:
+                    r = vc.call("POST", path, body, params=params)
+                except SpvError as e:
+                    tried.append(str(e)[:120])
+                    if "404" in str(e):
+                        break                      # wrong path: next path
+                    continue
+                csr = r if isinstance(r, str) else (r or {}).get("csr") or (r or {}).get("value")
+                if csr:
+                    break
             if csr:
                 break
-        except SpvError as e:
-            last = e
-    if not csr:
-        raise SpvError(f"WCP did not return a CSR ({last}). UI fallback: vCenter > Workload Management > Supervisors > "
-                       f"{s['name']} > Configure > Certificates > Workload platform management > Generate CSR")
+    if not csr or "CERTIFICATE REQUEST" not in csr:
+        raise SpvError("WCP did not return a CSR through the API on this build. Generate it in the UI: vCenter > "
+                       f"Workload Management > Supervisors > {s['name']} > Configure > Certificates > Workload "
+                       f"platform management > Generate CSR (common name {s['api_fqdn']}), save the PEM text as "
+                       f"{csr_file} and rerun --certs. (Tried: {' | '.join(tried[-3:])})")
     leaf, inter, root = libca.sign_csr(lab_spec, csr)
     chain = leaf.strip() + "\n" + inter.strip() + "\n"
+    os.makedirs(SPV_DIR, exist_ok=True)
+    open(os.path.join(SPV_DIR, f"{s['name']}_api_chain.pem"), "w").write(chain)
     liblog.print_logs("(Certs 2) Signed by the lab CA; installing the chain (leaf + intermediate).")
-    vc.call("PUT", f"/vcenter/namespace-management/clusters/{cid}/certificate-manager/tls-endpoint-certificate",
-            {"tls_endpoint_certificate": chain})
-    liblog.print_logs(f"    Installed. The API restarts its listener: give it a minute, then -m18 SPV --report.")
+    try:
+        vc.call("PATCH", f"/vcenter/namespace-management/clusters/{cid}", {"tls_endpoint_certificate": chain})
+    except SpvError as e:
+        raise SpvError(f"install failed ({e}). The signed chain is in {SPV_DIR}/{s['name']}_api_chain.pem: paste it in "
+                       f"the UI under Workload platform management > Replace")
+    if os.path.exists(csr_file):
+        os.rename(csr_file, csr_file + ".used")
+    liblog.print_logs("    Installed. The API restarts its listener: give it a minute, then -m18 SPV --report.")
 
 
 def _cert_check(host, port=443):

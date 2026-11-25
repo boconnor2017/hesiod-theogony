@@ -513,6 +513,7 @@ sudo python3 hesiod-theogony.py -m16 --configure
 | Module 2     | HKS needs to be running.                     |
 | Module 3     | Technitium needs to be running and availble. |
 | Module 8     | VCF Fleet is deployed.                       |
+| Module 10    | CA server needs to be running and available. |
 | Module 14    | VCF VI workload domain is deployed.          |
 
 This script uses the configuration from `lab_spec.json` in Module 1 to deploy a VKS Supervisor and a VPC to the workload domain from Module 14. The `SPV` parameter deploys the Supervisor and creates the NSX foundation for the VPC. The `VPC` parameter creates the namespace on the VPC and a "Hello World" workload (deployment with a load balancer).
